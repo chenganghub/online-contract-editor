@@ -1,0 +1,16 @@
+{
+  "name": "@oe/core",
+  "version": "0.0.0",
+  "private": true,
+  "description": "文档 JSON 操作库（纯函数，浏览器和 Node 共用）",
+  "type": "module",
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "scripts": {
+    "typecheck": "tsc --noEmit -p ."
+  },
+  "devDependencies": {
+    "@hufe921/canvas-editor": "1.0.6"
+  }
+}

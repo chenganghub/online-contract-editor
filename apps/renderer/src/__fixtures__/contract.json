@@ -1,0 +1,285 @@
+{
+ "doc": {
+  "header": [
+   {
+    "value": "采购合同",
+    "size": 12,
+    "color": "#8e8e93",
+    "rowFlex": "right"
+   }
+  ],
+  "main": [
+   {
+    "value": "采购合同",
+    "size": 26,
+    "bold": true,
+    "rowFlex": "center"
+   },
+   {
+    "value": "\n合同编号："
+   },
+   {
+    "type": "control",
+    "value": "",
+    "control": {
+     "value": null,
+     "placeholder": "合同编号",
+     "conceptId": "contractNo",
+     "prefix": "",
+     "postfix": "",
+     "type": "text"
+    }
+   },
+   {
+    "value": "\n甲方（采购方）："
+   },
+   {
+    "type": "control",
+    "value": "",
+    "control": {
+     "value": null,
+     "placeholder": "甲方",
+     "conceptId": "partyA",
+     "prefix": "",
+     "postfix": "",
+     "type": "text"
+    }
+   },
+   {
+    "value": "\n地址："
+   },
+   {
+    "type": "control",
+    "value": "",
+    "control": {
+     "value": null,
+     "placeholder": "甲方地址",
+     "conceptId": "partyAAddress",
+     "prefix": "",
+     "postfix": "",
+     "type": "text"
+    }
+   },
+   {
+    "value": "\n乙方（供应方）：华东智能装备有限公司"
+   },
+   {
+    "value": "\n地址：江苏省苏州市吴中区东吴北路 88 号"
+   },
+   {
+    "value": "\n根据《中华人民共和国民法典》及相关法律法规，甲乙双方经平等协商，就甲方向乙方采购设备事宜达成如下协议，以资共同遵守。"
+   },
+   {
+    "value": "\n第一条　采购标的",
+    "bold": true
+   },
+   {
+    "value": "\n乙方向甲方提供数控加工设备一批，品名、规格、数量详见附件《设备清单》。设备应为全新、未使用过的合格产品，符合国家标准和行业标准。"
+   },
+   {
+    "value": "\n第二条　合同价款",
+    "bold": true
+   },
+   {
+    "value": "\n合同总价为人民币 "
+   },
+   {
+    "type": "control",
+    "value": "",
+    "control": {
+     "value": null,
+     "placeholder": "合同金额",
+     "conceptId": "amount",
+     "prefix": "",
+     "postfix": "",
+     "type": "text"
+    }
+   },
+   {
+    "value": " 元（大写："
+   },
+   {
+    "type": "control",
+    "value": "",
+    "control": {
+     "value": null,
+     "placeholder": "金额大写",
+     "conceptId": "amountCN",
+     "prefix": "",
+     "postfix": "",
+     "type": "text",
+     "disabled": true
+    }
+   },
+   {
+    "value": "），为含税价，包括设备价款、包装、运输、保险、安装调试及培训费用。"
+   },
+   {
+    "value": "\n第三条　付款方式",
+    "bold": true
+   },
+   {
+    "value": "\n付款方式："
+   },
+   {
+    "type": "control",
+    "value": "",
+    "control": {
+     "value": null,
+     "placeholder": "付款方式",
+     "conceptId": "payMethod",
+     "prefix": "",
+     "postfix": "",
+     "type": "select",
+     "code": null,
+     "valueSets": [
+      {
+       "value": "一次性付款",
+       "code": "once"
+      },
+      {
+       "value": "分期付款",
+       "code": "stage"
+      }
+     ]
+    }
+   },
+   {
+    "value": "。甲方在设备验收合格并收到乙方开具的增值税专用发票后十五个工作日内付款。"
+   },
+   {
+    "value": "\n第四条　交货与验收",
+    "bold": true
+   },
+   {
+    "value": "\n乙方应于合同生效后三十日内将设备运至甲方指定地点，并在到货后五个工作日内完成安装调试。甲方应在安装调试完成后十个工作日内组织验收，验收不合格的，乙方应在七日内更换或修复。"
+   },
+   {
+    "value": "\n第五条　质量保证",
+    "bold": true
+   },
+   {
+    "value": "\n设备质量保证期为验收合格之日起十二个月。质保期内因设备本身质量问题造成的故障，乙方应在接到通知后二十四小时内响应，四十八小时内到场维修，费用由乙方承担。"
+   },
+   {
+    "value": "\n第六条　违约责任",
+    "bold": true
+   },
+   {
+    "value": "\n乙方逾期交货的，每逾期一日，应按合同总价的千分之一向甲方支付违约金；逾期超过三十日的，甲方有权解除合同。甲方逾期付款的，每逾期一日，应按逾期金额的千分之一向乙方支付违约金。"
+   },
+   {
+    "value": "\n第七条　争议解决",
+    "bold": true
+   },
+   {
+    "value": "\n因本合同引起的或与本合同有关的任何争议，双方应友好协商解决；协商不成的，任何一方均可向甲方所在地有管辖权的人民法院提起诉讼。"
+   },
+   {
+    "value": "\n第八条　其他",
+    "bold": true
+   },
+   {
+    "value": "\n本合同一式肆份，甲乙双方各执贰份，具有同等法律效力。本合同自双方法定代表人或授权代表签字并加盖公章或合同专用章之日起生效。"
+   },
+   {
+    "value": "\n（以下无正文）"
+   },
+   {
+    "value": "\n\n甲方（盖章）："
+   },
+   {
+    "type": "control",
+    "value": "",
+    "control": {
+     "value": null,
+     "placeholder": "甲方",
+     "conceptId": "partyA",
+     "prefix": "",
+     "postfix": "",
+     "type": "text"
+    }
+   },
+   {
+    "value": "\n\n乙方（盖章）：华东智能装备有限公司"
+   },
+   {
+    "value": "\n\n签订日期："
+   },
+   {
+    "type": "control",
+    "value": "",
+    "control": {
+     "value": null,
+     "placeholder": "签订日期",
+     "conceptId": "signDate",
+     "prefix": "",
+     "postfix": "",
+     "type": "date",
+     "dateFormat": "yyyy年MM月dd日"
+    }
+   }
+  ],
+  "footer": []
+ },
+ "fields": [
+  {
+   "key": "contractNo",
+   "label": "合同编号",
+   "type": "text"
+  },
+  {
+   "key": "partyA",
+   "label": "甲方",
+   "type": "picker",
+   "dataSource": {
+    "id": "customer",
+    "kind": "remote"
+   },
+   "fill": {
+    "partyA": "name",
+    "partyAAddress": "address"
+   }
+  },
+  {
+   "key": "partyAAddress",
+   "label": "甲方地址",
+   "type": "text"
+  },
+  {
+   "key": "amount",
+   "label": "合同金额",
+   "type": "amount"
+  },
+  {
+   "key": "amountCN",
+   "label": "金额大写",
+   "type": "computed",
+   "computed": {
+    "from": "amount",
+    "fn": "amountCN"
+   }
+  },
+  {
+   "key": "payMethod",
+   "label": "付款方式",
+   "type": "select",
+   "options": [
+    {
+     "value": "一次性付款",
+     "code": "once"
+    },
+    {
+     "value": "分期付款",
+     "code": "stage"
+    }
+   ]
+  },
+  {
+   "key": "signDate",
+   "label": "签订日期",
+   "type": "date",
+   "format": "yyyy年MM月dd日"
+  }
+ ]
+}

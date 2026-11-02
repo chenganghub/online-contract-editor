@@ -1,0 +1,30 @@
+{
+  "name": "@oe/renderer",
+  "version": "0.0.0",
+  "private": true,
+  "description": "渲染服务：无头 Chrome 页面池，出 PDF、docx、页数",
+  "type": "module",
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "scripts": {
+    "typecheck": "tsc --noEmit -p ."
+  },
+  "dependencies": {
+    "@hufe921/canvas-editor": "1.0.6",
+    "@hufe921/canvas-editor-plugin-docx": "1.0.0",
+    "@oe/core": "workspace:*",
+    "@oe/docx": "workspace:*",
+    "@pdf-lib/fontkit": "^1.1.1",
+    "fastify": "^5.12.7",
+    "jszip": "3.10.1",
+    "pdf-lib": "^1.17.1",
+    "playwright-core": "1.64.1",
+    "zod": "4.6.7"
+  },
+  "devDependencies": {
+    "pdfjs-dist": "6.4.299",
+    "tsx": "^4.23.15",
+    "vite": "^7.3.7"
+  }
+}

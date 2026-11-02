@@ -1,0 +1,130 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <link rel="icon" href="data:," />
+    <title>编辑器和服务端 PDF 逐页比对</title>
+  </head>
+  <body>
+    <div id="editor"></div>
+    <script type="module">
+      // 编辑器（和前端、渲染页同一个 canvas-editor）和 pdf.js 都直接从 apps/renderer 的 node_modules 引用
+      import Editor from '/apps/renderer/node_modules/@hufe921/canvas-editor/dist/canvas-editor.js'
+      import * as pdfjs from '/apps/renderer/node_modules/pdfjs-dist/build/pdf.mjs'
+      pdfjs.GlobalWorkerOptions.workerSrc = '/apps/renderer/node_modules/pdfjs-dist/build/pdf.worker.mjs'
+      let editor = null
+      const frame = () => new Promise((r) => requestAnimationFrame(() => r()))
+      const load = (src) => new Promise((r) => { const i = new Image(); i.onload = () => r(i); i.src = src })
+      /** 红色像素的重心（印章）：r 大、g b 小 */
+      const redCentroid = (ctx, w, h) => {
+        const d = ctx.getImageData(0, 0, w, h).data
+        let n = 0, sx = 0, sy = 0
+        for (let y = 0; y < h; y++) for (let x = 0; x < w; x++) { const i = (y * w + x) * 4; if (d[i] > 180 && d[i + 1] < 90 && d[i + 2] < 90) { n++; sx += x; sy += y } }
+        return n ? { x: sx / n, y: sy / n, n } : null
+      }
+      window.redSeal = () => {
+        const c = document.createElement('canvas'); c.width = c.height = 151
+        const g = c.getContext('2d'); g.fillStyle = 'rgb(220, 20, 20)'; g.beginPath(); g.arc(75.5, 75.5, 70, 0, Math.PI * 2); g.fill()
+        return c.toDataURL('image/png')
+      }
+      // 和渲染页一样：先等文档用到的字体都加载完，再建编辑器（打印模式）
+      window.createEditor = async (data, options) => {
+        const fonts = new Set([options.defaultFont])
+        const visit = (list) => { for (const e of list ?? []) { if (e.font) fonts.add(e.font); if (e.valueList) visit(e.valueList); if (e.control?.value) visit(e.control.value); for (const tr of e.trList ?? []) for (const td of tr.tdList ?? []) visit(td.value) } }
+        visit(data.header); visit(data.main); visit(data.footer)
+        await Promise.all([...fonts].map((f) => document.fonts.load(`16px "${f}"`, '合同').catch(() => [])))
+        await document.fonts.ready
+        editor = new Editor(document.querySelector('#editor'), data, { ...options, mode: 'print' })
+        const settle = async () => { let last = -1; for (let i = 0; i < 40; i++) { await frame(); const n = document.querySelectorAll('#editor canvas').length; if (n === last && n > 0) break; last = n } }
+        await settle()
+        // 和前端组件（packages/web/src/seals.ts）一样把印章挂到各自那一页
+        if (anchorSeals(editor, data)) await settle()
+        return true
+      }
+      function anchorSeals(ed, doc) {
+        const cmd = ed.command
+        const seals = (doc.main ?? []).filter((e) => e.type === 'image' && e.extension?.seal && e.imgFloatPosition && e.id)
+        if (!seals.length) return false
+        const mode = cmd.getOptions().mode
+        cmd.executeMode('edit')
+        for (const s of seals) cmd.executeDeleteElementById({ id: s.id })
+        cmd.executeSearch('\uFFFF', { isRegEnable: true, isIgnoreCase: false })
+        const list = cmd.getKeywordContext('[^\\u200B\\n]') || []
+        cmd.executeSearch(null)
+        const byPage = new Map()
+        for (const { range, startPosition } of list) if (!range.tableId && startPosition) byPage.set(startPosition.pageNo, [...(byPage.get(startPosition.pageNo) ?? []), range])
+        const first = new Map()
+        for (const pg of new Set(seals.map((s) => s.imgFloatPosition.pageNo))) {
+          for (const r of (byPage.get(pg) ?? []).sort((a, b) => a.startIndex - b.startIndex)) {
+            cmd.executeSetRange(r.startIndex, r.startIndex + 1)
+            const el = cmd.getRangeContext()?.selectionElementList?.[0]
+            if (el && !el.controlId) { first.set(pg, r.startIndex); break }
+          }
+        }
+        const at = (s) => first.get(s.imgFloatPosition.pageNo) ?? Infinity
+        for (const s of [...seals].sort((a, b) => at(b) - at(a))) {
+          const i = at(s)
+          if (Number.isFinite(i)) { cmd.executeSetRange(i, i); cmd.executeInsertElementList([s]) } else cmd.executeAppendElementList([s])
+        }
+        cmd.executeMode(mode)
+        return true
+      }
+      /** 编辑器一侧：每页正文第一行的字、关键字出现的次数、某页印章的位置 */
+      window.editorFacts = async (words, sealPage) => {
+        const cmd = editor.command
+        cmd.executeSearch('\uFFFF', { isRegEnable: true, isIgnoreCase: false })
+        const list = cmd.getKeywordContext('[^\\u200B\\n]') || []
+        cmd.executeSearch(null)
+        const byPage = new Map()
+        for (const { endPosition: p } of list) {
+          if (!p?.value || p.value === '\u200B' || p.value === '\n') continue
+          const arr = byPage.get(p.pageNo) ?? []
+          arr.push({ v: p.value, x: p.coordinate.leftTop[0], y: p.coordinate.leftTop[1] })
+          byPage.set(p.pageNo, arr)
+        }
+        const images = await cmd.getImage({ pixelRatio: 1, mode: 'print' })
+        const firstLines = images.map((_, pg) => {
+          const chars = byPage.get(pg) ?? []
+          const top = Math.min(...chars.map((c) => c.y))
+          return chars.filter((c) => Math.abs(c.y - top) < 2).sort((a, b) => a.x - b.x).map((c) => c.v).join('')
+        })
+        const counts = Object.fromEntries(words.map((w) => [w, (cmd.getKeywordRangeList(w) || []).length]))
+        const seals = []
+        for (const src of images) {
+          const img = await load(src)
+          const c = document.createElement('canvas'); c.width = img.width; c.height = img.height
+          const g = c.getContext('2d', { willReadFrequently: true }); g.drawImage(img, 0, 0)
+          seals.push(redCentroid(g, c.width, c.height))
+        }
+        return { pages: images.length, firstLines, counts, seal: seals[sealPage], seals }
+      }
+      /** PDF 一侧：每页正文第一行（跳过页眉区）、关键字次数、某页印章的位置（按 96 dpi 画出来找红色） */
+      window.pdfFacts = async (b64, words, sealPage, mainTop) => {
+        const bytes = Uint8Array.from(atob(b64), (c) => c.charCodeAt(0))
+        const pdf = await pdfjs.getDocument({ data: bytes }).promise
+        const firstLines = []
+        let all = ''
+        let seal = null
+        for (let n = 1; n <= pdf.numPages; n++) {
+          const page = await pdf.getPage(n)
+          const vp = page.getViewport({ scale: 96 / 72 })
+          const items = (await page.getTextContent()).items.filter((it) => it.str)
+          all += items.map((it) => it.str).join('') + '\n'
+          // 转成从上往下的像素坐标，找正文区（页眉以下）最上面的一行
+          const rows = items.map((it) => ({ s: it.str, x: it.transform[4], top: vp.height - it.transform[5] * (96 / 72) })).filter((r) => r.top >= mainTop)
+          const top = Math.min(...rows.map((r) => r.top))
+          firstLines.push(rows.filter((r) => Math.abs(r.top - top) < 3).sort((a, b) => a.x - b.x).map((r) => r.s).join(''))
+          if (n - 1 === sealPage) {
+            const c = document.createElement('canvas'); c.width = Math.round(vp.width); c.height = Math.round(vp.height)
+            const g = c.getContext('2d', { willReadFrequently: true })
+            await page.render({ canvasContext: g, viewport: vp }).promise
+            seal = redCentroid(g, c.width, c.height)
+          }
+        }
+        const counts = Object.fromEntries(words.map((w) => [w, all.split(w).length - 1]))
+        return { pages: pdf.numPages, firstLines, counts, seal }
+      }
+      window.ready = true
+    </script>
+  </body>
+</html>

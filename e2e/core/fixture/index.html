@@ -1,0 +1,22 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <link rel="icon" href="data:," />
+    <title>core 等价性测试</title>
+  </head>
+  <body>
+    <div id="editor" style="width: 794px"></div>
+    <script type="module">
+      // canvas-editor 的 ES 构建自带依赖，直接从 core 包的 node_modules 引用
+      import Editor from '/packages/core/node_modules/@hufe921/canvas-editor/dist/canvas-editor.js'
+      window.createEditor = (data) => {
+        const el = document.querySelector('#editor')
+        el.innerHTML = ''
+        window.editor = new Editor(el, data, { width: 794, height: 1123, margins: [96, 120, 96, 120] })
+        return true
+      }
+      window.ready = true
+    </script>
+  </body>
+</html>

@@ -1,0 +1,25 @@
+{
+  "name": "@oe/web",
+  "version": "0.0.0",
+  "private": true,
+  "description": "编辑器组件和 SDK（Vue 3，界面按 04-界面规范）",
+  "type": "module",
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "scripts": {
+    "typecheck": "vue-tsc --noEmit -p .",
+    "dev": "vite",
+    "build": "vite build"
+  },
+  "dependencies": {
+    "@hufe921/canvas-editor": "1.0.6",
+    "@oe/core": "workspace:*",
+    "vue": "^3.5.44"
+  },
+  "devDependencies": {
+    "@vitejs/plugin-vue": "^6.0.10",
+    "vite": "^7.3.7",
+    "vue-tsc": "^3.3.14"
+  }
+}

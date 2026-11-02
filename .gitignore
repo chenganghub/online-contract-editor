@@ -1,0 +1,16 @@
+node_modules/
+dist/
+*.log
+spike/**/output/
+coverage/
+playwright-report/
+test-results/
+.env
+.env.*
+!.env.example
+.agent/
+.agents/
+.codex/
+AGENTS.md
+CLAUDE.md
+storage/

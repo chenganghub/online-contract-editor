@@ -1,0 +1,28 @@
+{
+  "name": "@oe/server",
+  "version": "0.0.0",
+  "private": true,
+  "description": "服务端：模板、文档、令牌、操作接口（Fastify + MySQL 8）",
+  "type": "module",
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "scripts": {
+    "typecheck": "tsc --noEmit -p .",
+    "start": "tsx src/main.ts",
+    "db:generate": "drizzle-kit generate",
+    "create-api-client": "tsx scripts/create-api-client.ts"
+  },
+  "dependencies": {
+    "@oe/core": "workspace:*",
+    "drizzle-orm": "^0.45.4",
+    "fastify": "^5.12.7",
+    "mysql2": "^3.24.6",
+    "zod": "^4.6.7"
+  },
+  "devDependencies": {
+    "drizzle-kit": "^0.31.11",
+    "mysql-memory-server": "^1.18.0",
+    "tsx": "^4.23.15"
+  }
+}

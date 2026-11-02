@@ -1,0 +1,1 @@
+ALTER TABLE `seal_record` MODIFY COLUMN `id` varchar(100) NOT NULL;

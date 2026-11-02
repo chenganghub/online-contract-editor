@@ -1,0 +1,20 @@
+{
+  "name": "@oe/docx",
+  "version": "0.0.0",
+  "private": true,
+  "description": "canvas-editor docx 插件的补丁层：导入前扫描、导入后补回、导入报告、导出后修正",
+  "type": "module",
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "scripts": {
+    "typecheck": "tsc --noEmit -p ."
+  },
+  "dependencies": {
+    "@oe/core": "workspace:*",
+    "jszip": "3.10.1"
+  },
+  "devDependencies": {
+    "@hufe921/canvas-editor": "1.0.6"
+  }
+}

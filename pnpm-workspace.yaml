@@ -1,0 +1,6 @@
+# spike/ 是一次性验证代码，有自己的依赖，不进 workspace
+packages:
+  - packages/*
+  - apps/*
+onlyBuiltDependencies:
+  - esbuild

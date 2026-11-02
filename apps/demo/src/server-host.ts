@@ -1,0 +1,102 @@
+// 演示宿主接真实服务端（s13）：地址带 ?doc=<文档 id> 时用，模式和权限的模拟参数和本地版一样（main.ts）。
+// 先带宿主登录态向宿主后端要文档令牌（host-backend.ts），之后只用文档令牌，放在请求头 X-Document-Token；
+// 文档令牌和宿主登录态都不进任何地址（方案 4.7，验收 16）。接口和页面同源（真实部署由宿主反向代理 /api）
+import type { DocActions, EditorOptions, LoadedDocument, Mode, Permission } from '@oe/web'
+import { HOST_TOKEN } from './customers'
+
+type ServerDoc = LoadedDocument & { mode: Mode; version: number; status: string }
+export type HostFunctions = Pick<EditorOptions, 'mode' | 'modes' | 'load' | 'save' | 'publish' | 'onSeal' | 'download'>
+
+/** 失败时抛出服务端给的原因（错误响应是 { code, message }） */
+async function fail(res: Response, what: string): Promise<never> {
+  const body = (await res.json().catch(() => ({}))) as { message?: string }
+  throw new Error(`${what}失败：${body.message ?? res.status}`)
+}
+async function parse<T>(res: Response, what: string): Promise<T> {
+  if (!res.ok) return fail(res, what)
+  return (await res.json()) as T
+}
+
+/** 要令牌、按令牌取文档（模式、权限、能不能打印下载以服务端为准，隐藏字段的值服务端已经剔除），返回接到服务端的宿主函数 */
+export async function connectServer(docId: string, mode: Mode, permissions: Record<string, Permission>, actions: DocActions): Promise<HostFunctions> {
+  const { token } = await parse<{ token: string }>(
+    await fetch('/host/token', {
+      method: 'POST',
+      headers: { Authorization: HOST_TOKEN, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ documentId: docId, mode, permissions, actions }),
+    }),
+    '拿文档令牌',
+  )
+  const base = `/api/documents/${encodeURIComponent(docId)}`
+  const initial = await parse<ServerDoc>(await fetch(base, { headers: { 'X-Document-Token': token } }), '打开文档')
+  let version = initial.version
+  // 一个接一个发：服务端每次改动版本号加 1，后一个要带前一个返回的版本号（放章还在途时点「完成」，提交也排在后面）
+  let last: Promise<unknown> = Promise.resolve()
+  const send = (method: string, path: string, body: Record<string, unknown>) => {
+    const run = last
+      .catch(() => {})
+      .then(async () => {
+        const res = await fetch(base + path, { method, headers: { 'X-Document-Token': token, 'Content-Type': 'application/json' }, body: JSON.stringify({ ...body, version }) })
+        const r = await parse<{ version?: number }>(res, '保存')
+        if (typeof r.version === 'number') version = r.version
+      })
+    last = run
+    return run
+  }
+  // 填写模式只提交可编辑（含必填）字段的值，服务端按令牌的权限写进文档，和 core 的 applyFill 同一个判定（方案 4.7）
+  const permOf = (key: string, own?: Permission) => initial.permissions?.[key] ?? own ?? 'editable'
+  const editable = new Set(initial.fields.filter((f) => f.type !== 'computed' && ['editable', 'required'].includes(permOf(f.key, f.permission))).map((f) => f.key))
+  return {
+    mode: initial.mode,
+    modes: [initial.mode],
+    load: async () => initial,
+    save: async ({ mode, doc, values, pageCount, areas }) => {
+      if (mode === 'edit') return send('PUT', '', { doc, values, pageCount })
+      if (mode === 'fill') {
+        const patch = Object.fromEntries(Object.entries(values.values).filter(([k]) => editable.has(k)))
+        // 改过的可编辑区一起提交，服务端只接受模板里标成可编辑区的
+        return send('PATCH', '/data', { patch, areas, pageCount })
+      }
+      if (mode === 'seal') return send('POST', '/seal-status', { action: 'submit' })
+    },
+    onSeal: (op) => send('POST', '/seals', op),
+    download: async (format) => {
+      const res = await fetch(`${base}/export?format=${format}`, { headers: { 'X-Document-Token': token } })
+      if (!res.ok) return fail(res, '下载')
+      const url = URL.createObjectURL(await res.blob())
+      const a = document.createElement('a')
+      a.href = url
+      a.download = `${initial.title ?? '文档'}.${format}`
+      a.click()
+      setTimeout(() => URL.revokeObjectURL(url), 10_000)
+    },
+  }
+}
+
+/** 模板令牌仅用于草稿；宿主密钥和业务数据不交给编辑器。 */
+export async function connectTemplate(templateId: string): Promise<HostFunctions> {
+  const opened = await parse<{ templateId: string; token: string }>(await fetch('/host/template', {
+    method: 'POST', headers: { Authorization: HOST_TOKEN, 'Content-Type': 'application/json' }, body: JSON.stringify({ templateId }),
+  }), '打开模板')
+  const url = new URL(location.href)
+  url.searchParams.set('template', opened.templateId)
+  history.replaceState(null, '', url)
+  const base = `/api/templates/${encodeURIComponent(opened.templateId)}/draft`
+  const headers = { 'X-Template-Token': opened.token, 'Content-Type': 'application/json' }
+  const initial = await parse<LoadedDocument & { version: number }>(await fetch(base, { headers }), '加载草稿')
+  let version = initial.version
+  let last: Promise<unknown> = Promise.resolve()
+  const send = (method: string, suffix: string, body: object) => {
+    const run = last.catch(() => {}).then(async () => {
+      const result = await parse<{ version: number }>(await fetch(base + suffix, { method, headers, body: JSON.stringify({ ...body, version }) }), '保存模板')
+      version = result.version
+    })
+    last = run
+    return run
+  }
+  return {
+    mode: 'edit', modes: ['edit'], load: async () => initial,
+    save: async ({ doc, fields }) => send('PUT', '', { doc, fields }),
+    publish: () => send('POST', '/publish', {}),
+  }
+}
