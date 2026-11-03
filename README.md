@@ -4,6 +4,10 @@
 
 [English](README.en.md) · [开源说明与搜索词](docs/open-source.md) · [MIT License](LICENSE)
 
+**[在线演示](https://chenganghub.github.io/online-contract-editor/)**：打开即可编辑模板、填写合同、放置印章和打印，客户联选使用样例数据。保存仅在当前浏览器；Word 导入、服务端导出及模板发布需本地运行完整服务。
+
+演示由 GitHub Actions 自动部署到 Pages。自行部署时，在仓库 Settings → Pages 将 Source 设为 GitHub Actions；构建命令为 `pnpm --filter @oe/demo build --mode pages`，产物位于 `apps/demo/dist`。
+
 **开发预览版：一期功能已通过本地验收。** Word 排版保真仍有已知差异，详见下文。
 
 ## 功能

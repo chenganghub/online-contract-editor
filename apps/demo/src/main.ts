@@ -1,9 +1,11 @@
 // 演示宿主页：模拟业务系统接入编辑器。
 // 地址带 ?doc=<文档 id> 时接真实服务端（server-host.ts；本机用 scripts/stack.ts 起整套环境），否则文档存在 localStorage
 import { createEditor, type DocActions, type DocData, type DocValues, type FieldDef, type Mode, type Permission, type RequestFn, type SealOp } from '@oe/web'
-import { HOST_TOKEN } from './customers'
+import { CUSTOMERS, HOST_TOKEN, queryCustomers } from './customers'
 import { DATA_SOURCES, FIELDS, demoSeals, sampleDoc } from './sample'
+import { showPagesNotice } from './pages'
 import { connectServer, connectTemplate, type HostFunctions } from './server-host'
+const pages = import.meta.env.MODE === 'pages'
 const KEY = 'oe-demo-document'
 interface Stored {
   doc: DocData
@@ -29,6 +31,10 @@ const actions: DocActions = allowed ? { print: allowed.includes('print'), downlo
 const request: RequestFn = async ({ url, method, query, body }) => {
   const u = new URL(url, location.origin)
   for (const [k, v] of Object.entries(query ?? {})) u.searchParams.set(k, String(v))
+  if (pages) {
+    if (u.pathname === '/api/customers') return queryCustomers(CUSTOMERS, u.searchParams)
+    throw new Error('在线演示不连接后端，请在本地运行完整服务。')
+  }
   const res = await fetch(u, {
     method,
     headers: { Authorization: HOST_TOKEN, ...(body === undefined ? {} : { 'Content-Type': 'application/json' }) },
@@ -55,7 +61,7 @@ const local: HostFunctions = {
   load: async () => {
     const saved = localStorage.getItem(KEY)
     const s: Stored | null = saved ? JSON.parse(saved) : null
-    return { title: '采购合同', doc: s?.doc ?? sampleDoc(), values: s?.values, fields: s?.fields ?? FIELDS, permissions, actions }
+    return { title: '采购合同', doc: s?.doc ?? sampleDoc(), values: s?.values, fields: s?.fields ?? FIELDS, libraryFields: pages ? FIELDS : undefined, permissions, actions }
   },
   save: async ({ doc, values, fields }) => {
     localStorage.setItem(KEY, JSON.stringify({ doc, values, fields } satisfies Stored))
@@ -63,14 +69,16 @@ const local: HostFunctions = {
   onSeal: async (op) => {
     sealOps.push(op)
   },
-  download: () => {},
+  download: pages ? undefined : () => {},
 }
 
 const el = document.querySelector<HTMLElement>('#app')!
+if (pages) showPagesNotice(KEY)
 let docId = params.get('doc')
 let openingMode = mode ?? 'edit'
 const templateId = params.get('template')
 try {
+  if (pages && (templateId || docId || params.has('fromTemplate'))) throw new Error('此演示仅使用浏览器本地文档，请移除地址中的服务端文档或模板参数后重试。')
   if (params.has('fromTemplate')) {
     const created = await request({ url: '/host/contract', method: 'POST', body: { templateId: params.get('fromTemplate'), versionNo: Number(params.get('version') ?? 1), orderId: 'order-1' } }) as { id: string; permissions: Record<string, Permission> }
     docId = created.id
@@ -81,7 +89,7 @@ try {
     history.replaceState(null, '', `?${params}`)
   }
   const host = templateId ? await connectTemplate(templateId) : docId ? await connectServer(docId, openingMode, permissions, actions) : local
-  const handle = await createEditor(el, { ...host, seals: demoSeals(), request, dataSources: DATA_SOURCES, importDocx,
+  const handle = await createEditor(el, { ...host, seals: demoSeals(), request, dataSources: DATA_SOURCES, importDocx: pages ? undefined : importDocx,
     previewSamples: [
       { id: 'order-1', label: '采购单 001', values: { partyA: '上海示例客户', partyAAddress: '上海市浦东新区', partyACredit: '913100000000000001', amount: '5200', payMethod: 'once', signDate: '2026-03-18', items: [{ name: '显示器', model: '27英寸', qty: '2', price: '2600' }] } },
       { id: 'order-2', label: '采购单 002', values: { partyA: '杭州示例客户', partyAAddress: '杭州市西湖区', partyACredit: '913300000000000002', amount: '800', payMethod: 'stage', signDate: '2026-04-01', items: [{ name: '键盘', model: '标准版', qty: '4', price: '200' }] } },

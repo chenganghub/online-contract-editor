@@ -4,6 +4,10 @@ An open-source contract editor and document template designer built with Vue 3, 
 
 [中文](README.md) · [MIT License](LICENSE) · [Third-party notices](THIRD_PARTY_NOTICES.md)
 
+**[Live demo](https://chenganghub.github.io/online-contract-editor/)**: edit templates, fill contracts, place stamp images and print with sample customer data. Documents are saved only in your browser. Word import, server exports and template publishing require the full local stack.
+
+GitHub Actions deploys the demo to Pages. For your own deployment, select GitHub Actions in Settings → Pages. Build with `pnpm --filter @oe/demo build --mode pages`; output is in `apps/demo/dist`.
+
 **Development preview. Phase one has passed local acceptance.**
 
 ## Features

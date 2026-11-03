@@ -1,0 +1,28 @@
+body.pages-demo {
+  display: flex;
+  flex-direction: column;
+}
+.pages-demo #app {
+  flex: 1;
+  min-height: 0;
+}
+.pages-notice {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px 16px;
+  padding: 8px 16px;
+  font: 13px/1.5 system-ui, sans-serif;
+  color: #243b53;
+  background: #edf5ff;
+}
+.pages-notice span { flex: 1 1 400px; }
+.pages-notice a { color: #0056b3; }
+.pages-notice button {
+  border: 1px solid #bcccdc;
+  border-radius: 5px;
+  padding: 3px 8px;
+  color: #243b53;
+  background: white;
+  cursor: pointer;
+}

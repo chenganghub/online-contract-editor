@@ -86,6 +86,7 @@ const hostBackend = (): Plugin => ({
 
 // 导入 Word 走本机渲染服务（apps/renderer，默认 3200 端口）
 export default defineConfig({
+  base: './',
   plugins: [vue(), mockApi(), hostBackend()],
   server: { proxy: { '/convert': 'http://127.0.0.1:3200', ...(SERVER ? { '/api/documents': SERVER, '/api/templates': SERVER } : {}) } },
 })
