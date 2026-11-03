@@ -19,6 +19,7 @@ type W = Window & {
   createEditor(d: unknown, o: unknown): Promise<boolean>
   editorFacts(words: string[], sealPage: number): Promise<Facts>
   pdfFacts(b64: string, words: string[], sealPage: number, mainTop: number): Promise<Facts>
+  pdfWordBox(b64: string, word: string): Promise<{ page: number; x0: number; y0: number; x1: number; y1: number } | null>
 }
 interface Facts {
   pages: number
@@ -68,10 +69,35 @@ async function compare(page: Page, renderer: Renderer, origin: string, base: Doc
   const mm = (Math.hypot(ed.seal!.x - pdf.seal!.x, ed.seal!.y - pdf.seal!.y) * 25.4) / 96
   expect(mm).toBeLessThanOrEqual(1)
 
+  // 能选中：pdf.js 把 words[0] 所在那页的文字层铺出来（和 PDF 阅读器一样），鼠标从它第一个字拖到最后一个字，选中的字里有它
+  await page.setViewportSize({ width: 1000, height: 1200 })
+  const box = await page.evaluate(([b, w]) => (window as unknown as W).pdfWordBox(b, w), [res.json().pdf as string, words[0]!] as const)
+  expect(box, `文字层里有「${words[0]}」`).toBeTruthy()
+  await page.mouse.move(box!.x0 + 1, box!.y0)
+  await page.mouse.down()
+  await page.mouse.move(box!.x1 - 1, box!.y1, { steps: 8 })
+  await page.mouse.up()
+  const selected = squeeze(await page.evaluate(() => window.getSelection()?.toString() ?? ''))
+  expect(selected).toContain(words[0])
+
   fs.mkdirSync(evidence, { recursive: true })
   fs.writeFileSync(
     path.join(evidence, name),
-    JSON.stringify({ pages: ed.pages, renderMs: ms, timings: res.json().timings, counts: ed.counts, sealEditor: ed.seal, sealPdf: pdf.seal, sealDeviationMm: Number(mm.toFixed(3)), firstLines: ed.firstLines.map((l, i) => [squeeze(l), squeeze(pdf.firstLines[i]!)]) }, null, 1),
+    JSON.stringify(
+      {
+        pages: ed.pages,
+        renderMs: ms,
+        timings: res.json().timings,
+        counts: ed.counts,
+        sealEditor: ed.seal,
+        sealPdf: pdf.seal,
+        sealDeviationMm: Number(mm.toFixed(3)),
+        selected: { word: words[0], page: box!.page, text: selected },
+        firstLines: ed.firstLines.map((l, i) => [squeeze(l), squeeze(pdf.firstLines[i]!)]),
+      },
+      null,
+      1,
+    ),
   )
 }
 

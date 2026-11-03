@@ -3,6 +3,8 @@
   <head>
     <meta charset="UTF-8" />
     <link rel="icon" href="data:," />
+    <!-- pdf.js 文字层的样式（选字的测试用） -->
+    <link rel="stylesheet" href="/apps/renderer/node_modules/pdfjs-dist/web/pdf_viewer.css" />
     <title>编辑器和服务端 PDF 逐页比对</title>
   </head>
   <body>
@@ -123,6 +125,58 @@
         }
         const counts = Object.fromEntries(words.map((w) => [w, all.split(w).length - 1]))
         return { pages: pdf.numPages, firstLines, counts, seal }
+      }
+      /**
+       * 能选中：找到 word 所在的那一页，用 pdf.js 的 TextLayer（PDF 阅读器里能选字靠的就是它）把文字层铺在页面左上角，
+       * 返回 word 第一个字所在那段文字的左边、最后一个字所在那段的右边（页面坐标），测试用鼠标从左拖到右
+       */
+      window.pdfWordBox = async (b64, word) => {
+        const pdf = await pdfjs.getDocument({ data: Uint8Array.from(atob(b64), (c) => c.charCodeAt(0)) }).promise
+        for (let n = 1; n <= pdf.numPages; n++) {
+          const page = await pdf.getPage(n)
+          const vp = page.getViewport({ scale: 96 / 72 })
+          document.querySelector('#pdf-text')?.remove()
+          const wrap = document.createElement('div')
+          wrap.id = 'pdf-text'
+          wrap.style.cssText = `position:fixed;left:0;top:0;width:${vp.width}px;height:${vp.height}px;background:#fff;z-index:1000;--scale-factor:${vp.scale};--user-unit:1;--total-scale-factor:${vp.scale};--scale-round-x:1px;--scale-round-y:1px`
+          const layer = document.createElement('div')
+          layer.className = 'textLayer'
+          wrap.append(layer)
+          document.body.append(wrap)
+          await new pdfjs.TextLayer({ textContentSource: page.streamTextContent(), container: layer, viewport: vp }).render()
+          const spans = [...layer.querySelectorAll('span')].filter((s) => s.textContent)
+          let text = ''
+          const starts = spans.map((s) => { const at = text.length; text += s.textContent; return at })
+          const at = text.indexOf(word)
+          if (at < 0) continue
+          const a = spans[starts.findLastIndex((s) => s <= at)].getBoundingClientRect()
+          const b = spans[starts.findLastIndex((s) => s <= at + word.length - 1)].getBoundingClientRect()
+          return { page: n, x0: a.left, y0: a.top + a.height / 2, x1: b.right, y1: b.top + b.height / 2 }
+        }
+        return null
+      }
+      /** 两份 PDF 逐页画成图（96 dpi）逐像素比，返回每页颜色不一样的像素数（RGB 任一通道差超过 8 算不一样）；页数对不上的页记 -1 */
+      window.pdfPixelDiff = async (a64, b64) => {
+        const open = (b64) => pdfjs.getDocument({ data: Uint8Array.from(atob(b64), (c) => c.charCodeAt(0)) }).promise
+        const [a, b] = [await open(a64), await open(b64)]
+        const draw = async (pdf, n) => {
+          const page = await pdf.getPage(n)
+          const vp = page.getViewport({ scale: 96 / 72 })
+          const c = document.createElement('canvas'); c.width = Math.round(vp.width); c.height = Math.round(vp.height)
+          const g = c.getContext('2d', { willReadFrequently: true })
+          await page.render({ canvasContext: g, viewport: vp }).promise
+          return g.getImageData(0, 0, c.width, c.height).data
+        }
+        const out = []
+        for (let n = 1; n <= Math.max(a.numPages, b.numPages); n++) {
+          if (n > a.numPages || n > b.numPages) { out.push(-1); continue }
+          const [x, y] = [await draw(a, n), await draw(b, n)]
+          if (x.length !== y.length) { out.push(-1); continue }
+          let d = 0
+          for (let i = 0; i < x.length; i += 4) if (Math.abs(x[i] - y[i]) > 8 || Math.abs(x[i + 1] - y[i + 1]) > 8 || Math.abs(x[i + 2] - y[i + 2]) > 8) d++
+          out.push(d)
+        }
+        return out
       }
       window.ready = true
     </script>

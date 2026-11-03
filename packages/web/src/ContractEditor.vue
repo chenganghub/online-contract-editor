@@ -161,6 +161,8 @@ function setValues(values: Record<string, FieldValue>) {
     // 值不合法（循环不是数组、图片不是 dataURL、文档里没有绑定的表格或图片）时 setFieldValues 先抛错、不改文档，这一批都不生效
     setFieldValues(data as unknown as Parameters<typeof setFieldValues>[0], Object.fromEntries(structural.map((k) => [k, values[k]!])), plain(fields))
     silently(() => cmd().executeSetValue(data))
+    // 新生成的循环行也要继承当前模式和字段权限，与保存重开时一致。
+    applyPermissions()
     // 装回后字段控件的 controlId 不变（保存时带着）；万一有对不上的，丢掉「最后输入的控件」记录，同步时按第一处来
     for (const [k, id] of Object.entries(lastTyped)) if (!idsOf(k).includes(id)) delete lastTyped[k]
   }

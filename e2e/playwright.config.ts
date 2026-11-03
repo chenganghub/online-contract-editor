@@ -6,6 +6,8 @@ export default defineConfig({
   testMatch: '**/*.spec.ts',
   timeout: 60_000,
   fullyParallel: true,
+  // 每个 worker 可能同时启动 MySQL、Vite 和渲染 Chrome，限制并发避免争用本机资源。
+  workers: 2,
   reporter: [['list']],
   use: { channel: 'chrome', headless: true },
 })

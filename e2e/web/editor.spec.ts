@@ -172,6 +172,8 @@ test('四种模式：编辑能改正文；填写只能改控件；盖章只能�
   await setMode(page, 'seal')
   await typeInBody(page, '民法典》', 'Z')
   expect(await count(page, 'Z')).toBe(0)
+  await typeInField(page, 'contractNo', 'S')
+  expect((await values(page)).values.contractNo).toBe('HT01')
   await page.dragAndDrop('.oe .seal-card[data-seal="contract"]', '.oe .pages', { targetPosition: { x: 400, y: 500 } })
   await expect(page.locator('.oe .seal-handle')).toHaveCount(1)
   await expect(page.locator('.oe .inspector .row-meta')).toHaveText('第 1 页')
@@ -200,6 +202,9 @@ test('四种模式：编辑能改正文；填写只能改控件；盖章只能�
   await expect(page.locator('.oe .oe-print')).toBeVisible()
   await typeInBody(page, '民法典》', 'W')
   expect(await count(page, 'W')).toBe(0)
+  await typeInField(page, 'contractNo', 'V')
+  expect((await values(page)).values.contractNo).toBe('HT01')
+  expect(await count(page, 'X')).toBe(1)
 
   // 保存后刷新：正文、字段值、印章都在（印章靠 id 移动和删除，保存时要带上 id）
   await setMode(page, 'edit')
@@ -899,7 +904,23 @@ test('接真实服务端全流程：宿主改值改条款后打开编辑器看�
     const fromRender = await pdfPageTexts(rendered.rawPayload)
     expect(fromRender).toEqual(fromEditor)
     for (const w of ['HT-2026-0202', '358600', '叁拾伍万捌仟陆佰元整']) expect(fromEditor.join(''), w).toContain(w)
-    fs.writeFileSync(path.join(evidence, 's13-render-vs-editor.json'), JSON.stringify({ renderMs, pages: fromEditor.length, samePerPageText: true, firstChars: fromEditor.map((p) => p.slice(0, 30)) }, null, 1))
+    // 两份 PDF 在相同分辨率下逐页比较图像，覆盖排版、字体、字段、页眉页脚。
+    const files = await serve(root)
+    const cmp = await browser.newPage()
+    let pixelDiff: number[] = []
+    try {
+      await cmp.goto(`${files.origin}/e2e/render/fixture/index.html`)
+      await cmp.waitForFunction(() => (window as unknown as { ready?: boolean }).ready)
+      pixelDiff = await cmp.evaluate(
+        ([a, b]) => (window as unknown as { pdfPixelDiff(a: string, b: string): Promise<number[]> }).pdfPixelDiff(a, b),
+        [Buffer.from(exported.rawPayload).toString('base64'), Buffer.from(rendered.rawPayload).toString('base64')] as const,
+      )
+    } finally {
+      await cmp.close()
+      await files.close()
+    }
+    expect(pixelDiff).toEqual(fromEditor.map(() => 0))
+    fs.writeFileSync(path.join(evidence, 's13-render-vs-editor.json'), JSON.stringify({ renderMs, pages: fromEditor.length, samePerPageText: true, pixelDiff, firstChars: fromEditor.map((p) => p.slice(0, 30)) }, null, 1))
 
     // 9. 令牌和宿主登录态不进任何地址（验收 16）：页面、脚本、接口的地址里都没有；接口请求只带文档令牌请求头，不带宿主登录态
     expect(tokens).toHaveLength(6)

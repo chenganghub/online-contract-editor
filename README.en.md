@@ -53,11 +53,11 @@ E2E tests use installed Chrome. The optional external contract test requires `OE
 
 ## Limitations
 
-Word import has known first-line indentation, numbering, font and line-height differences that can change pagination. Pixel-identical Word/WPS rendering is not guaranteed. Additional PDF selection, permission and export acceptance, WPS review and final acceptance remain pending.
+Word import has known first-line indentation, numbering, font and line-height differences that can change pagination. Pixel-identical Word/WPS rendering is not guaranteed. PDF mouse selection, mode permissions, export equivalence and WPS comparison have been checked. At the project owner's request, no materials were sent to an external model for this round; final second-model acceptance remains pending.
 
 The demo uses temporary storage. Production integration requires persistent database/storage, host authentication and secret configuration. See [API configuration](apps/server/src/config.ts). Workspace packages are not published to npm.
 
-The publication check found a repeating-table JSON equivalence failure involving default permission flags, plus server-test and cleanup timeouts. These remain unresolved; see the [verification record](docs/verification.md).
+On 2026-11-03, lint, type checks, all 127 unit/integration tests and all 31 browser tests passed, including the local private-contract check. Repeating-table permission equivalence is fixed; the full browser suite uses two workers. see the [verification record](docs/verification.md).
 
 Contributions are welcome. Use synthetic reproduction data and remove contract contents, personal information and credentials before opening an issue or PR.
 

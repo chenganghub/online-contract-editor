@@ -114,7 +114,7 @@ test('同一组操作：编辑器命令和 core 的结果装回编辑器后相�
 test('同一组操作：服务端 POST /documents/{id}/operations 和编辑器命令的结果装回编辑器后相同（验收 12）', async ({ page, context }) => {
   test.setTimeout(120_000)
   const server = await serve(root)
-  const api = await startTempServer()
+  const api = await test.step('启动临时 MySQL 和 API', () => startTempServer())
   try {
     const host = { authorization: `Bearer ${api.apiKey}` }
     // 模板是在编辑器里做好、按编辑器的格式存的
@@ -144,8 +144,8 @@ test('同一组操作：服务端 POST /documents/{id}/operations 和编辑器�
     // 服务端存的 JSON（不经编辑器规整）也一致
     expect.soft(norm(saved)).toEqual(norm(byEditor))
   } finally {
-    await api.stop()
-    await server.close()
+    await test.step('关闭临时 MySQL 和 API', () => api.stop())
+    await test.step('关闭静态服务', () => server.close())
   }
 })
 

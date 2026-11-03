@@ -17,7 +17,10 @@ let renderer: Awaited<ReturnType<typeof startRenderer>>
 const documentCreates: unknown[] = []
 const host = () => ({ authorization: `Bearer ${server.apiKey}` })
 
+test.describe.configure({ mode: 'default' })
+
 test.beforeAll(async () => {
+  test.setTimeout(180_000)
   server = await startTempServer()
   server.app.addHook('preHandler', async (req) => {
     if (req.method === 'POST' && req.url === '/api/documents') documentCreates.push(req.body)
@@ -31,7 +34,7 @@ test.beforeAll(async () => {
   vite = await createServer({ root: path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../../apps/demo'), server: { host: '127.0.0.1', port: 0, proxy: { '/convert': renderer.origin } } })
   await vite.listen()
   origin = vite.resolvedUrls!.local[0]!
-}, 180_000)
+})
 
 test.afterAll(async () => {
   await vite?.close()
