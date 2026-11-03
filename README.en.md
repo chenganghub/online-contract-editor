@@ -4,7 +4,7 @@ An open-source contract editor and document template designer built with Vue 3, 
 
 [中文](README.md) · [MIT License](LICENSE) · [Third-party notices](THIRD_PARTY_NOTICES.md)
 
-**Development preview. Core features are implemented; final acceptance is pending.**
+**Development preview. Phase one has passed local acceptance.**
 
 ## Features
 
@@ -53,7 +53,7 @@ E2E tests use installed Chrome. The optional external contract test requires `OE
 
 ## Limitations
 
-Word import has known first-line indentation, numbering, font and line-height differences that can change pagination. Pixel-identical Word/WPS rendering is not guaranteed. PDF mouse selection, mode permissions, export equivalence and WPS comparison have been checked. At the project owner's request, no materials were sent to an external model for this round; final second-model acceptance remains pending.
+Word import has known first-line indentation, numbering, font and line-height differences that can change pagination. Pixel-identical Word/WPS rendering is not guaranteed. PDF mouse selection, mode permissions, export equivalence and WPS comparison have been checked. The project owner approved local review for phase-one acceptance. No materials were sent to an external model for this round, and no second-model final review report exists.
 
 The demo uses temporary storage. Production integration requires persistent database/storage, host authentication and secret configuration. See [API configuration](apps/server/src/config.ts). Workspace packages are not published to npm.
 
