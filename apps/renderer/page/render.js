@@ -195,6 +195,21 @@ function positions(pageCount) {
   }
 }
 
+// HTML、纯文本：打印模式下有的取值命令取不到控件，先切到编辑模式取完再切回（和前端 ContractEditor 的 inEditMode 一样）。
+// 外壳（htmlDocument / textDocument）在 Node 里套，和前端下载的同一套（@oe/core）
+function inEdit(fn) {
+  const cmd = editor.command
+  const mode = cmd.getOptions().mode
+  cmd.executeMode('edit')
+  try {
+    return fn()
+  } finally {
+    cmd.executeMode(mode)
+  }
+}
+const html = () => inEdit(() => editor.command.getHTML())
+const text = () => inEdit(() => editor.command.getText())
+
 async function docx() {
   const blob = await editor.command.executeExportDocx({ fileName: 'document' })
   const bytes = new Uint8Array(await blob.arrayBuffer())
@@ -221,4 +236,4 @@ async function importDocx(b64, options) {
   }
 }
 
-window.__renderer = { load, images, positions, docx, importDocx, ready: true }
+window.__renderer = { load, images, positions, docx, importDocx, html, text, ready: true }

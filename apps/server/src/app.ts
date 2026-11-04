@@ -369,37 +369,50 @@ export async function buildApp(deps: AppDeps): Promise<FastifyInstance> {
     })
   })
 
-  // ---------- 出文件（方案 4.9、第 12 节第 1 轮第 3 条；验收 1、15）----------
-  const MIME = { pdf: 'application/pdf', docx: 'application/vnd.openxmlformats-officedocument.wordprocessingml.document' }
-  const sendFile = (reply: FastifyReply, file: Buffer, format: 'pdf' | 'docx', title: string, headers: Record<string, string | number>) => {
+  // ---------- 出文件（方案 4.9、第 12 节第 1 轮第 3 条；验收 1、15；07 第 2 节加 html、txt）----------
+  const MIME = {
+    pdf: 'application/pdf',
+    docx: 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+    html: 'text/html; charset=utf-8',
+    txt: 'text/plain; charset=utf-8',
+  }
+  type FileFormat = keyof typeof MIME
+  const FORMAT = z.enum(['pdf', 'docx', 'html', 'txt'])
+  const sendFile = (reply: FastifyReply, file: Buffer, format: FileFormat, title: string, headers: Record<string, string | number>) => {
     for (const [k, v] of Object.entries(headers)) reply.header(k, v)
     return reply
       .type(MIME[format])
       .header('Content-Disposition', `attachment; filename*=UTF-8''${encodeURIComponent(`${title}.${format}`)}`)
       .send(file)
   }
+  /** 渲染结果里取那一种格式的文件 */
+  const fileOf = (r: Awaited<ReturnType<RendererClient['render']>>, format: FileFormat): Buffer => {
+    const file = format === 'pdf' ? r.pdf : format === 'docx' ? r.docx : format === 'html' ? (r.html === undefined ? undefined : Buffer.from(r.html, 'utf8')) : r.txt === undefined ? undefined : Buffer.from(r.txt, 'utf8')
+    if (!file) throw new HttpError(502, 'RENDER_FAILED', '渲染服务没有返回文件')
+    return file
+  }
+  /** PDF、Word 和编辑器保存时的页数核对；HTML、文本不分页，不核对 */
+  const paged = (format: FileFormat) => format === 'pdf' || format === 'docx'
 
   // 下载文档：只用已保存的数据。带 ?version= 时版本对不上 409（宿主要的是「已盖章」那一版时用）。令牌调用时按权限剔除隐藏字段的值
   app.get<{ Params: { id: string }; Querystring: Record<string, string> }>('/api/documents/:id/export', async (req, reply) => {
     const id = parse(ID, req.params.id)
-    const q = parse(z.object({ format: z.enum(['pdf', 'docx']).default('pdf'), version: z.coerce.number().int().positive().optional() }), req.query)
+    const q = parse(z.object({ format: FORMAT.default('pdf'), version: z.coerce.number().int().positive().optional() }), req.query)
     const caller = await callerFor(req, id)
     if (caller.kind === 'token' && !caller.actions.download) throw new HttpError(403, 'ACTION_FORBIDDEN', '这个文档令牌不能下载')
     const [row] = await db.select().from(document).where(eq(document.id, id)).limit(1)
     if (!row) throw new HttpError(404, 'NOT_FOUND', '文档不存在')
     if (q.version !== undefined && q.version !== row.version) throw new HttpError(409, 'VERSION_CONFLICT', `文档当前是第 ${row.version} 版，不是第 ${q.version} 版`)
     const doc = caller.kind === 'token' ? stripHidden(row.doc, row.values, row.fields, caller.perms).data : row.doc
-    const expectedPages = seesStripped(caller, row.fields) ? undefined : (row.pageCount ?? undefined)
+    const expectedPages = seesStripped(caller, row.fields) || !paged(q.format) ? undefined : (row.pageCount ?? undefined)
     const r = await rendererOf().render({ doc, documentId: id, version: row.version, title: row.title, outputs: [q.format], expectedPages })
-    const file = q.format === 'pdf' ? r.pdf : r.docx
-    if (!file) throw new HttpError(502, 'RENDER_FAILED', '渲染服务没有返回文件')
-    return sendFile(reply, file, q.format, row.title, { 'X-Document-Version': row.version, 'X-Page-Count': r.pageCount })
+    return sendFile(reply, fileOf(r, q.format), q.format, row.title, { 'X-Document-Version': row.version, 'X-Page-Count': r.pageCount })
   })
 
   // 不建文档，直接用模板版本 + 数据出文件（验收 15）
   app.post('/api/render', async (req, reply) => {
     const caller = await requireHost(req)
-    const body = parse(z.object({ templateId: ID, versionNo: z.number().int().positive(), values: VALUES.default({}), title: z.string().max(200).optional(), format: z.enum(['pdf', 'docx']).default('pdf') }), req.body)
+    const body = parse(z.object({ templateId: ID, versionNo: z.number().int().positive(), values: VALUES.default({}), title: z.string().max(200).optional(), format: FORMAT.default('pdf') }), req.body)
     await checkTemplateOwner(body.templateId, caller.clientId)
     const [v] = await db.select().from(templateVersion).where(and(eq(templateVersion.templateId, body.templateId), eq(templateVersion.versionNo, body.versionNo))).limit(1)
     if (!v) throw new HttpError(404, 'NOT_FOUND', '模板版本不存在')
@@ -409,9 +422,34 @@ export async function buildApp(deps: AppDeps): Promise<FastifyInstance> {
     const [t] = await db.select().from(template).where(eq(template.id, body.templateId)).limit(1)
     const title = body.title ?? t?.name ?? '未命名'
     const r = await rendererOf().render({ doc: filled.data, title, outputs: [body.format] })
-    const file = body.format === 'pdf' ? r.pdf : r.docx
-    if (!file) throw new HttpError(502, 'RENDER_FAILED', '渲染服务没有返回文件')
-    return sendFile(reply, file, body.format, title, { 'X-Page-Count': r.pageCount })
+    return sendFile(reply, fileOf(r, body.format), body.format, title, { 'X-Page-Count': r.pageCount })
+  })
+
+  // 格式转换（07 第 2 节）：不落库，宿主后端用。docx → 编辑器文档 JSON + 导入报告（to=json），
+  // 或 docx / 文档 JSON → pdf、docx、html、txt。docx 和 doc 给且只给一个
+  app.post('/api/convert', async (req, reply) => {
+    await requireHost(req)
+    const body = parse(
+      z
+        .object({
+          docx: z.string().min(1).max(15 * 1024 * 1024).optional(),
+          doc: DOC.optional(),
+          to: z.enum(['json', 'pdf', 'docx', 'html', 'txt']),
+          title: z.string().min(1).max(200).default('文档'),
+        })
+        .refine((b) => !!b.doc !== !!b.docx, 'docx（base64）和 doc（文档 JSON）要给且只给一个')
+        .refine((b) => !(b.doc && b.to === 'json'), '文档 JSON 不用再转成 JSON'),
+      req.body,
+    )
+    let doc = body.doc as DocData | undefined
+    if (body.docx) {
+      const r = await rendererOf().convert(Buffer.from(body.docx, 'base64'))
+      if (body.to === 'json') return { doc: r.doc, report: r.report, pageCount: r.pageCount }
+      doc = r.doc
+    }
+    const format = body.to as FileFormat
+    const r = await rendererOf().render({ doc: doc!, title: body.title, outputs: [format] })
+    return sendFile(reply, fileOf(r, format), format, body.title, { 'X-Page-Count': r.pageCount })
   })
 
   // ---------- 批量操作（方案 4.8；验收 13、14）----------

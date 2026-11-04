@@ -1,0 +1,41 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <link rel="icon" href="data:," />
+    <title>业务系统嵌入示例</title>
+    <style>
+      /* 模拟一个普通业务系统页面：不用 Vue，编辑器在右边的 iframe 里 */
+      html, body { height: 100%; margin: 0; font: 13px/1.5 -apple-system, "Segoe UI", "Microsoft YaHei", sans-serif; }
+      body { display: grid; grid-template-columns: 300px 1fr; }
+      aside { overflow: auto; padding: 16px; border-right: 1px solid #ddd; background: #fafafa; }
+      h1 { margin: 0 0 12px; font-size: 15px; }
+      h2 { margin: 16px 0 8px; font-size: 12px; color: #666; }
+      button { margin: 0 4px 6px 0; padding: 4px 10px; }
+      input { width: 100%; box-sizing: border-box; margin-bottom: 6px; padding: 4px 6px; }
+      pre { overflow: auto; max-height: 240px; margin: 0; padding: 8px; background: #fff; border: 1px solid #ddd; font-size: 11px; white-space: pre-wrap; }
+      iframe { width: 100%; height: 100%; border: 0; }
+    </style>
+  </head>
+  <body>
+    <aside>
+      <h1>业务系统（嵌入示例）</h1>
+      <h2>调编辑器</h2>
+      <input id="contractNo" placeholder="合同编号" value="HT-2026-1105" />
+      <button id="setData">填合同编号</button>
+      <button id="validate">校验</button>
+      <button id="getData">取数据</button>
+      <button id="getText">取文字</button>
+      <button id="fill">切到填写</button>
+      <button id="edit">切到编辑</button>
+      <button id="pdf">下载 PDF</button>
+      <button id="docx">下载 Word</button>
+      <button id="apply">批量替换条款</button>
+      <h2>编辑器发来的事件</h2>
+      <pre id="log"></pre>
+    </aside>
+    <iframe id="editor" title="合同编辑器"></iframe>
+    <script type="module" src="/src/embed-host.ts"></script>
+  </body>
+</html>

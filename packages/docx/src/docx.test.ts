@@ -202,8 +202,8 @@ describe('导出修正', () => {
     expect(out.main[0]!.control).toMatchObject({ prefix: '', postfix: '' })
     expect(out.main[1]!.control).toMatchObject({ prefix: '【', postfix: '' })
     expect(out.header![1]).toEqual({ type: 'tab', value: '\t' })
-    // 区域拆掉、内容放回原处（里面的控件也处理）；隐藏的区域不导出
-    expect(out.main.map((e) => e.value)).toEqual(['', '', '\n补充：', '双方无其他约定。', ''])
+    // 区域拆掉、内容放回原处（里面的控件也处理），区域自成一段（编辑器里它另起一行）；隐藏的区域不导出
+    expect(out.main.map((e) => e.value)).toEqual(['', '', '\n补充：', '\n双方无其他约定。', ''])
     expect(out.main[4]!.control).toMatchObject({ prefix: '', postfix: '' })
     expect(doc.main[0]!.control!.prefix).toBeUndefined()
     expect(doc.header![1]!.value).toBe('')

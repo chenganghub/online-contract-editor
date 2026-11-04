@@ -1,7 +1,7 @@
 // 一次渲染：装文档 → 页面图 → 文字位置 → （worker 里）拼 PDF；docx 在页面里导出。
 // 规则来自方案第 12 节：页数以页面图张数为准，和期望页数不一致时重建页面重试一次，仍不一致返回 409；
 // 单次限时、总限时，超时也重试一次。
-import { layoutOptions, type DocData } from '@oe/core'
+import { choicesAsText, hasChoices, htmlDocument, layoutOptions, textDocument, type DocData, type DocParts } from '@oe/core'
 import { exportInfo, fixExportedDocx, prepareForExport, type Doc } from '@oe/docx'
 import { HttpError } from './errors'
 import type { FontConfig } from './fonts'
@@ -9,7 +9,7 @@ import { buildPdfInWorker } from './pdf'
 import type { PagePool, Slot } from './pool'
 import { buildPages, type Positions } from './text-layer'
 
-export type Output = 'pdf' | 'docx' | 'pages'
+export type Output = 'pdf' | 'docx' | 'pages' | 'html' | 'txt'
 
 export interface RenderInput {
   doc: DocData
@@ -29,6 +29,9 @@ export interface RenderResult {
   pageCount: number
   pdf?: Uint8Array
   docx?: Uint8Array
+  /** 整份 HTML、纯文本（和前端下载的同一套外壳，@oe/core 的 htmlDocument / textDocument） */
+  html?: string
+  txt?: string
   /** 文档里用了、但字体配置里没有的字体：排版会用替代字体，分页可能和屏幕不一样 */
   unknownFonts: string[]
   attempts: number
@@ -47,6 +50,8 @@ export type RendererWindow = {
     images(pixelRatio: number): Promise<string[]>
     positions(pageCount: number): Positions
     docx(): Promise<string>
+    html(): DocParts
+    text(): DocParts
     importDocx(b64: string, options: unknown): Promise<{ data: Doc; options: { defaultFont?: string; defaultSize?: number } & Record<string, unknown> }>
   }
 }
@@ -71,24 +76,31 @@ interface Rendered {
   images?: string[]
   positions?: Positions
   docx?: string
+  html?: DocParts
+  text?: DocParts
   fonts: string[]
   timings: Record<string, number>
 }
 
-/** docxDoc：导出 docx 用的文档（prepareForExport 拆过区域、列表）；PDF 和页数照原文档出，和编辑器一样 */
-async function renderOnce(slot: Slot, input: RenderInput, docxDoc?: DocData): Promise<Rendered> {
+/**
+ * docxDoc：导出 docx 用的文档（prepareForExport 拆过区域、列表）；textDoc：出 HTML、纯文本用的（复选、单选写成 ☑ ☐，没有这两种控件时就是原文档）。
+ * PDF 和页数照原文档出，和编辑器一样
+ */
+async function renderOnce(slot: Slot, input: RenderInput, docxDoc: DocData | undefined, textDoc: DocData): Promise<Rendered> {
   const { page } = slot
   const timings: Record<string, number> = {}
   const wantPdf = input.outputs.includes('pdf')
+  const wantHtml = input.outputs.includes('html')
+  const wantTxt = input.outputs.includes('txt')
   const needLayout = wantPdf || input.outputs.includes('pages') || input.expectedPages !== undefined
-  // 页面里现在装的是哪一份：先装出 PDF、数页数要的原文档；只要 docx 时直接装 docx 用的
+  // 页面里现在装的是哪一份：要出 PDF、数页数时先装原文档；只要 HTML、文本时装 textDoc；只要 docx 时直接装 docx 用的
   let loaded: DocData | undefined
   const load = async (doc: DocData) => {
     loaded = doc
     return page.evaluate((a) => (window as unknown as RendererWindow).__renderer.load(a), { doc, options: editorOptions(doc, input.options) })
   }
   let t = now()
-  const { fonts } = await load(needLayout || !docxDoc ? input.doc : docxDoc)
+  const { fonts } = await load(needLayout ? input.doc : wantHtml || wantTxt ? textDoc : (docxDoc ?? input.doc))
   timings.loadMs = Math.round(now() - t)
   const out: Rendered = { pageCount: 0, fonts, timings }
   // 不出 PDF 时也要数页数（要求核对页数或要页数时）：用很小的倍率出图，只数张数
@@ -103,6 +115,17 @@ async function renderOnce(slot: Slot, input: RenderInput, docxDoc?: DocData): Pr
     t = now()
     out.positions = await page.evaluate((n) => (window as unknown as RendererWindow).__renderer.positions(n), out.pageCount)
     timings.positionsMs = Math.round(now() - t)
+  }
+  if (wantHtml || wantTxt) {
+    if (loaded !== textDoc) {
+      t = now()
+      await load(textDoc)
+      timings.textLoadMs = Math.round(now() - t)
+    }
+    t = now()
+    if (wantHtml) out.html = await page.evaluate(() => (window as unknown as RendererWindow).__renderer.html())
+    if (wantTxt) out.text = await page.evaluate(() => (window as unknown as RendererWindow).__renderer.text())
+    timings.textMs = Math.round(now() - t)
   }
   if (docxDoc) {
     // 换装 docx 用的文档单独计时（docxLoadMs），docxMs 只算插件导出
@@ -125,6 +148,8 @@ export async function render(pool: PagePool, fonts: FontConfig, limits: RenderLi
   const docxDoc = input.outputs.includes('docx')
     ? (prepareForExport(input.doc as unknown as Doc, { defaultSize: editorOptions(input.doc, input.options).defaultSize }) as unknown as DocData)
     : undefined
+  // HTML、纯文本：复选、单选控件写成字（和前端 docParts 一样），没有这两种控件就用原文档，不用多装一次
+  const textDoc = (input.outputs.includes('html') || input.outputs.includes('txt')) && hasChoices(input.doc) ? choicesAsText(input.doc) : input.doc
   const left = () => limits.totalTimeoutMs - (now() - start)
   let mismatch: number | null = null
   let lastError: unknown = null
@@ -138,7 +163,7 @@ export async function render(pool: PagePool, fonts: FontConfig, limits: RenderLi
     const queueMs = Math.round(now() - t)
     let broken = false
     try {
-      const r = await withTimeout(renderOnce(slot, input, docxDoc), Math.min(limits.attemptTimeoutMs, left()), '渲染')
+      const r = await withTimeout(renderOnce(slot, input, docxDoc, textDoc), Math.min(limits.attemptTimeoutMs, left()), '渲染')
       r.timings.queueMs = queueMs
       if (input.expectedPages !== undefined && r.pageCount !== input.expectedPages) {
         // 页数不一致：可能是页面状态不干净或字体没加载好，重建这个标签再试一次
@@ -194,6 +219,8 @@ export async function render(pool: PagePool, fonts: FontConfig, limits: RenderLi
     result.timings.glyphs = pdf.glyphs
     result.timings.skippedGlyphs = pdf.skipped
   }
+  if (done.html) result.html = htmlDocument(input.title ?? '文档', done.html, input.doc.page)
+  if (done.text) result.txt = textDocument(done.text)
   result.timings.totalMs = Math.round(now() - start)
   return result
 }

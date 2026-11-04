@@ -24,7 +24,7 @@ const FILES: Record<string, { file: string; type: string }> = {
   '/vendor/docx.js': { file: path.join(pkgDir('@hufe921/canvas-editor-plugin-docx'), 'dist', 'docx.js'), type: 'text/javascript; charset=utf-8' },
 }
 
-const OUTPUT = z.enum(['pdf', 'docx', 'pages'])
+const OUTPUT = z.enum(['pdf', 'docx', 'pages', 'html', 'txt'])
 const BODY = z.object({
   doc: z.object({ main: z.array(z.any()), header: z.array(z.any()).optional(), footer: z.array(z.any()).optional() }).passthrough(),
   options: z.record(z.string(), z.unknown()).optional(),
@@ -75,6 +75,8 @@ export async function startRenderer(config: RendererConfig): Promise<Renderer> {
       pageCount: result.pageCount,
       pdf: result.pdf ? Buffer.from(result.pdf).toString('base64') : undefined,
       docx: result.docx ? Buffer.from(result.docx).toString('base64') : undefined,
+      html: result.html,
+      txt: result.txt,
       unknownFonts: result.unknownFonts,
       attempts: result.attempts,
       timings: result.timings,

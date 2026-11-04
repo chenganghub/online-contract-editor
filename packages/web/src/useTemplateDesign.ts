@@ -74,7 +74,8 @@ export function useTemplateDesign(options: {
   }
   function mouseup(e: MouseEvent) {
     refresh()
-    if (selection.value) Object.assign(floating, { open: true, left: Math.min(e.clientX, window.innerWidth - 240), top: Math.min(e.clientY + 12, window.innerHeight - 48) })
+    // 只在左键选完文字时浮出；右键有自己的菜单（里面也有「设为字段」），两个不叠在一起
+    if (selection.value && e.button === 0) Object.assign(floating, { open: true, left: Math.min(e.clientX, window.innerWidth - 300), top: Math.min(e.clientY + 12, window.innerHeight - 48) })
   }
   function drop(e: DragEvent) {
     const key = e.dataTransfer!.getData('application/x-oe-field')

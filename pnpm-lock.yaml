@@ -162,9 +162,21 @@ importers:
       '@hufe921/canvas-editor':
         specifier: 1.0.6
         version: 1.0.6
+      '@hufe921/canvas-editor-plugin-docx':
+        specifier: 1.0.0
+        version: 1.0.0(@hufe921/canvas-editor@1.0.6)
       '@oe/core':
         specifier: workspace:*
         version: link:../core
+      '@oe/docx':
+        specifier: workspace:*
+        version: link:../docx
+      jszip:
+        specifier: 3.10.1
+        version: 3.10.1
+      pdf-lib:
+        specifier: ^1.17.1
+        version: 1.17.1
       vue:
         specifier: ^3.5.44
         version: 3.5.44(typescript@6.0.3)

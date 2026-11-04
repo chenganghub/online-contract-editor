@@ -7,7 +7,7 @@ export interface RenderRequest {
   documentId?: string
   version?: number
   title?: string
-  outputs: ('pdf' | 'docx' | 'pages')[]
+  outputs: ('pdf' | 'docx' | 'pages' | 'html' | 'txt')[]
   /** 编辑器保存时按打印模式数的页数；给了渲染服务就核对，不一致重试一次，仍不一致 409 */
   expectedPages?: number
   pixelRatio?: number
@@ -16,6 +16,9 @@ export interface RenderResponse {
   pageCount: number
   pdf?: Buffer
   docx?: Buffer
+  /** 整份 HTML、纯文本 */
+  html?: string
+  txt?: string
   timings?: Record<string, number>
 }
 export interface ConvertResponse {
@@ -53,8 +56,8 @@ export function httpRenderer(baseUrl: string, timeoutMs: number): RendererClient
   }
   return {
     async render(req) {
-      const r = await post<{ pageCount: number; pdf?: string; docx?: string; timings?: Record<string, number> }>('/render', req)
-      return { pageCount: r.pageCount, pdf: r.pdf ? Buffer.from(r.pdf, 'base64') : undefined, docx: r.docx ? Buffer.from(r.docx, 'base64') : undefined, timings: r.timings }
+      const r = await post<{ pageCount: number; pdf?: string; docx?: string; html?: string; txt?: string; timings?: Record<string, number> }>('/render', req)
+      return { pageCount: r.pageCount, pdf: r.pdf ? Buffer.from(r.pdf, 'base64') : undefined, docx: r.docx ? Buffer.from(r.docx, 'base64') : undefined, html: r.html, txt: r.txt, timings: r.timings }
     },
     convert: (docx) => post<ConvertResponse>('/convert', { docx: docx.toString('base64') }),
   }

@@ -18,10 +18,17 @@ body.pages-demo {
 }
 .pages-notice span { flex: 1 1 400px; }
 .pages-notice a { color: #0056b3; }
-.pages-notice button {
+.pages-notice label {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+.pages-notice button,
+.pages-notice select {
   border: 1px solid #bcccdc;
   border-radius: 5px;
   padding: 3px 8px;
+  font: inherit;
   color: #243b53;
   background: white;
   cursor: pointer;

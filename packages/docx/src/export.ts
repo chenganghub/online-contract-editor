@@ -1,7 +1,7 @@
 // 插件导出 docx 后再修一遍（方案 4.10）：写默认字体、写重复标题行、横向页面、页眉距离、表格列宽和单元格边距、行尾空格的下划线。
 // 控件的花括号、制表符在导出前处理（prepareForExport）。
 import JSZip from 'jszip'
-import { DEFAULT_FONT, DEFAULT_SIZE } from '@oe/core'
+import { choicesAsText, DEFAULT_FONT, DEFAULT_SIZE, type DocData } from '@oe/core'
 import { tablesOf, walk, type Doc, type El } from './model'
 import { attr, directChildren, escapeAttr, spans } from './xml'
 
@@ -24,9 +24,10 @@ const HEADER_TOP = 30
  * - 制表符：插件按段落拆文字时跳过值为空的元素，制表符元素的值是空的，整个丢掉（导入的页眉「公司名 ⇥ 合同编号」就挤在一起）；
  *   给它一个值，插件才会写出 <w:tab/>。
  * - 区域、列表：见 flatten；段前段后间距：见 markSpacing（s13 WPS 对比）
+ * - 复选、单选控件：写成「☑空调 ☐网络」这样的字（@oe/core 的 choicesAsText）。插件在打印模式下拿到的只有选项文字，勾就丢了
  */
 export function prepareForExport<T extends Doc>(doc: T, options: { defaultSize?: number } = {}): T {
-  const out = structuredClone(doc)
+  const out = choicesAsText(doc as unknown as DocData) as unknown as T
   const size = options.defaultSize ?? DEFAULT_SIZE
   // 标记用的私用区字符是保留的：文字里本来就有的先去掉，免得被当成标记
   for (const zone of [out.header, out.main, out.footer]) for (const el of walk(zone)) if (typeof el.value === 'string') el.value = el.value.replace(RESERVED, '')
@@ -58,14 +59,49 @@ export function prepareForExport<T extends Doc>(doc: T, options: { defaultSize?:
  */
 function flatten(list: El[] | undefined, size: number): El[] | undefined {
   if (!list) return list
-  return list.flatMap((el) => {
-    if (el.type === 'area') return el.area?.hide ? [] : (flatten(el.valueList, size) ?? [])
-    if (el.type === 'list') return listParagraphs(el, size).flatMap((e) => flatten([e], size) ?? [])
+  const out: El[] = []
+  list.forEach((el, i) => {
+    if (el.type === 'area') {
+      if (!el.area?.hide) out.push(...areaParagraphs(el, out.at(-1), list[i + 1], size))
+      return
+    }
+    if (el.type === 'list') {
+      out.push(...listParagraphs(el, size).flatMap((e) => flatten([e], size) ?? []))
+      return
+    }
     if (el.valueList) el.valueList = flatten(el.valueList, size)
     if (el.type === 'control' && Array.isArray(el.control?.value)) el.control.value = flatten(el.control.value, size) ?? []
     if (el.type === 'table') for (const tr of el.trList ?? []) for (const td of tr.tdList ?? []) td.value = flatten(td.value, size) ?? []
-    return [el]
+    out.push(el)
   })
+  return out
+}
+
+// 插件自己成段的块元素：遇到它们先结束前面的段落，块后面的内容另起一段
+const OWN_PARAGRAPH = new Set(['title', 'table', 'separator'])
+const paragraphAttrs = (el: El | undefined): El => {
+  const out: El = { value: '\n' }
+  for (const k of PARAGRAPH_ATTRS) if (el?.[k] !== undefined) out[k] = el[k]
+  return out
+}
+
+/**
+ * 区域拆成普通段落。编辑器里区域自成一段（canvas-editor 排版时前后元素的 areaId 不同就换行），插件里没有区域，
+ * 不处理的话区域的字会接在前一段后面（「第一条 服务内容系统部署……」）。
+ * - 前面：区域的字前面加一个换行，标题、表格、分隔线后面不加（插件已经另起一段）。前面的字本来就以换行结尾、或区域在开头时，
+ *   编辑器里有一个空行（换行那一行加区域自己那一行），加了换行 docx 里也多一个空段，两边一样
+ * - 后面：接着的字不是换行开头、也不是块元素或区域时，补一个换行（编辑器里它在下一行）
+ */
+function areaParagraphs(area: El, prev: El | undefined, next: El | undefined, size: number): El[] {
+  const out = [...(flatten(area.valueList, size) ?? [])]
+  if (!(prev && OWN_PARAGRAPH.has(prev.type ?? ''))) {
+    const first = out[0]
+    if (first && isPlainRun(first) && typeof first.value === 'string') out[0] = { ...first, value: `\n${first.value}` }
+    else out.unshift(paragraphAttrs(first))
+  }
+  const opensParagraph = !next || next.type === 'area' || next.type === 'list' || OWN_PARAGRAPH.has(next.type ?? '') || (isPlainRun(next) && String(next.value ?? '').startsWith('\n'))
+  if (!opensParagraph) out.push(paragraphAttrs(next))
+  return out
 }
 
 /**

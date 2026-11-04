@@ -19,6 +19,8 @@ export interface PageSetup {
   /** 竖放时的上、右、下、左 */
   margins?: [number, number, number, number]
   pageNumber?: { format?: string; rowFlex?: 'left' | 'center' | 'right'; disabled?: boolean }
+  /** 水印（07 加的）：草稿、机密、副本这类，编辑器、PDF、Word 都画；不填就没有 */
+  watermark?: { data: string; color?: string; opacity?: number; size?: number }
 }
 
 export type FieldType =

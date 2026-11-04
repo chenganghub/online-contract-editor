@@ -1,4 +1,5 @@
 import type { IncomingMessage } from 'node:http'
+import { fileURLToPath } from 'node:url'
 import { defineConfig, type Plugin } from 'vite'
 import vue from '@vitejs/plugin-vue'
 import { CUSTOMERS, HOST_TOKEN, queryCustomers } from './src/customers'
@@ -85,8 +86,11 @@ const hostBackend = (): Plugin => ({
 })
 
 // 导入 Word 走本机渲染服务（apps/renderer，默认 3200 端口）
+// 三个页面：演示宿主页（index）、iframe 嵌入页（embed）、不用 Vue 的业务系统嵌入示例（embed-host）
+const page = (name: string) => fileURLToPath(new URL(`./${name}.html`, import.meta.url))
 export default defineConfig({
   base: './',
+  build: { rollupOptions: { input: { index: page('index'), embed: page('embed'), 'embed-host': page('embed-host') } } },
   plugins: [vue(), mockApi(), hostBackend()],
   server: { proxy: { '/convert': 'http://127.0.0.1:3200', ...(SERVER ? { '/api/documents': SERVER, '/api/templates': SERVER } : {}) } },
 })

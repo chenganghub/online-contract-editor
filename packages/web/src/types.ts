@@ -1,4 +1,4 @@
-import type { AreaRun, DocData, DocValues, FieldDef, Mode, Permission } from '@oe/core'
+import type { AreaRun, DocData, DocValues, FieldDef, FieldValue, Mode, Permission } from '@oe/core'
 
 /** 宿主提供的印章（当前用户可用的印章，来自宿主函数） */
 export interface SealOption {
@@ -106,6 +106,8 @@ export interface EditorOptions {
   onSeal?: (op: SealOp) => Promise<void>
   /** 编辑模式「导入 Word」：宿主把文件交给服务端转换（POST /templates 传 docx，或渲染服务 /convert）；不传就没有这一项 */
   importDocx?: (file: File) => Promise<ImportResult>
+  /** 有没保存的修改时，关闭或刷新页面前浏览器提醒；不传算开。宿主自己管离开提醒时传 false，用 EditorHandle.isDirty() 判断 */
+  confirmLeave?: boolean
 }
 
 /** 导入 Word 的结果：服务端（渲染服务 /convert）转好的文档和导入报告 */
@@ -118,6 +120,26 @@ export interface ImportResult {
   }
   pageCount?: number
 }
+
+/** 编辑器发给宿主的事件（EditorHandle.on；iframe 嵌入时转发给父页面） */
+export interface EditorEvents {
+  /** 编辑器装好了 */
+  ready: undefined
+  /** 用户改了内容（停 300 毫秒发一次） */
+  change: undefined
+  /** 字段值变了：用户填的、选的，宿主 setData 的都算 */
+  'field-change': { key: string; value: FieldValue; previous: FieldValue }
+  /** 保存（或提交、发布）成功 */
+  saved: { mode: Mode; published: boolean }
+  'mode-change': Mode
+  /** 有没有没保存的修改变了 */
+  'dirty-change': boolean
+  /** 光标进入、离开字段 */
+  'field-focus': { key: string; label: string } | null
+}
+
+/** 打开文件、下载的格式（docs/设计/07 第 2 节） */
+export type { ExportFormat, ImportFormat } from './files'
 
 /** 盖章操作，字段和服务端 POST /documents/{id}/seals 的入参一致（版本号由宿主加） */
 export type SealOp =

@@ -2,16 +2,25 @@
 // 编辑器组件：真实的 canvas-editor + 四种模式 + 检查器 + 数据选择弹层 + 盖章层。
 // 界面按 docs/设计/04-界面规范.md，结构和原型 spike/canvas/ui.html 一致。
 // 同字段同步、盖章写法来自 K9a 验证和方案第 12 节第 2 轮第 4、5 条。
-import { computed, nextTick, onBeforeUnmount, onMounted, reactive, ref, shallowRef, toRaw } from 'vue'
-import Editor, { AreaMode, EditorMode, ListType, LocationPosition, RowFlex, TitleLevel, type IEditorOption, type IElement, type IRangeStyle } from '@hufe921/canvas-editor'
+import { computed, nextTick, onBeforeUnmount, onMounted, reactive, ref, shallowRef, toRaw, watch } from 'vue'
+import Editor, { AreaMode, EditorMode, LocationPosition, PaperDirection, type ICatalogItem, type IEditorOption, type IElement, type IRangeStyle } from '@hufe921/canvas-editor'
 import {
   AREA_MAX_LENGTH,
   AREA_MAX_RUNS,
+  applyBatch,
+  type BatchResult,
+  type Op,
+  DEFAULT_FONT,
+  DEFAULT_SIZE,
   areaAnchors,
+  hasChoices,
+  htmlDocument,
+  textDocument,
   areaStyle,
   layoutOptions,
   pageSize,
   setFieldValues,
+  type LayoutOptions,
   toChineseAmount,
   type AreaRun,
   type DocData,
@@ -20,6 +29,7 @@ import {
   type FieldType,
   type FieldValue,
   type Mode,
+  type PageSetup,
   type Permission,
   type Snapshot,
 } from '@oe/core'
@@ -27,12 +37,36 @@ import { FIELD_KEY, fieldElement } from './elements'
 import { uid } from './ids'
 import { anchorSeals, type SealElement } from './seals'
 import OeIcon from './OeIcon.vue'
+import FormatBar from './FormatBar.vue'
+import FindBar from './FindBar.vue'
+import StatusBar from './StatusBar.vue'
 import TemplateFields from './TemplateFields.vue'
 import TemplateBlanks from './TemplateBlanks.vue'
 import TemplatePreview from './TemplatePreview.vue'
 import { useTemplateDesign } from './useTemplateDesign'
-import type { IconName } from './icons'
-import type { DocActions, ImportResult, PickItem, PickSearch, PreviewSample, SavePayload, SealOp, SealOption } from './types'
+import { shortcut, tip, type FormatState } from './formats'
+import {
+  EXTENSION,
+  IMPORT_ACCEPT,
+  IMPORT_LIMIT,
+  MIME,
+  docParts,
+  downloadBlob,
+  exportDocxInBrowser,
+  htmlToDoc,
+  importDocxInBrowser,
+  importFormatOf,
+  markdownToHtml,
+  parseDocumentJson,
+  pdfFromImages,
+  safeName,
+  textToElements,
+  zipImages,
+  type DocumentFile,
+  type ExportFormat,
+  type ImportFormat,
+} from './files'
+import type { DocActions, EditorEvents, ImportResult, PickItem, PickSearch, PreviewSample, SavePayload, SealOp, SealOption } from './types'
 
 const props = defineProps<{
   mode: Mode
@@ -52,6 +86,19 @@ const props = defineProps<{
   download?: (format: 'pdf' | 'docx') => void | Promise<void>
   onSeal?: (op: SealOp) => Promise<void>
   importDocx?: (file: File) => Promise<ImportResult>
+  /** 有没保存的修改时离开页面提醒；不传算开 */
+  confirmLeave?: boolean
+}>()
+
+// 给宿主的事件（SDK 的 on，iframe 嵌入转发给父页面）：名字和载荷见 types.ts 的 EditorEvents
+const emit = defineEmits<{
+  ready: []
+  change: []
+  'field-change': [change: EditorEvents['field-change']]
+  saved: [info: EditorEvents['saved']]
+  'mode-change': [mode: Mode]
+  'dirty-change': [dirty: boolean]
+  'field-focus': [field: EditorEvents['field-focus']]
 }>()
 
 const MODE_NAMES: Record<Mode, string> = { edit: '编辑', fill: '填写', seal: '盖章', view: '只读' }
@@ -88,6 +135,16 @@ const editor = shallowRef<Editor>()
 const mode = ref<Mode>(props.mode)
 const status = ref('已保存')
 const saving = ref(false)
+// 有没保存的修改：编辑过、导入过就算；保存、提交、发布成功（含盖章操作交给宿主成功）清掉。失败的提示不改它
+const dirty = ref(false)
+const SAVED_STATES = new Set(['已保存', '已提交', '已完成', '已发布'])
+watch(status, (s) => {
+  if (s === '已编辑' || s === '已导入') dirty.value = true
+  else if (SAVED_STATES.has(s)) dirty.value = false
+})
+/** 状态文字用主色提醒：没填完、格式不对、保存失败这类 */
+const NORMAL_STATES = new Set([...SAVED_STATES, '已编辑', '已导入', '正在保存', '正在导入', '正在导出'])
+const attention = computed(() => !NORMAL_STATES.has(status.value))
 const fields = reactive<FieldDef[]>(structuredClone(props.fields))
 const perms = reactive<Record<string, Permission>>({ ...props.permissions })
 const snapshots = reactive<Record<string, Snapshot>>({ ...props.values?.snapshots })
@@ -96,12 +153,20 @@ const preview = shallowRef<DocData>()
 const blankRevision = ref(0)
 const tick = ref(0)
 const thumb = reactive({ width: 0, x: 0 })
-// area：光标在可编辑区里；canArea：能设可编辑区（选中了文字，或光标在区域里）
-const style = reactive({ bold: false, italic: false, underline: false, list: false, rowFlex: 'left', size: 16, level: '', area: false, canArea: false })
+// 光标处的样式，格式栏和撤销重做按钮按它显示（字段说明见 formats.ts 的 FormatState）
+const style = reactive<FormatState>({
+  bold: false, italic: false, underline: false, strikeout: false, type: '', font: DEFAULT_FONT, size: DEFAULT_SIZE, color: null, highlight: null,
+  rowFlex: 'left', rowMargin: 1, listType: '', level: '', painter: false, undo: false, redo: false, area: false, canArea: false,
+})
+// 状态栏：当前页（从 0 起）、页数、字数、缩放比例。缩放也会被 canvas-editor 自己的 Ctrl + 滚轮改，以它的事件为准
+const pageNo = ref(0)
+const pageCount = ref(1)
+const words = ref<number | null>(null)
+const scale = ref(1)
+const scrollId = uid()
 const shownModes = computed(() => props.modes ?? [props.mode])
-// 打印、下载按令牌（宿主给的 actions）；下载还要宿主传了 download
+// 打印、下载按令牌（宿主给的 actions）；下载见「下载」一节的 canExport
 const canPrint = computed(() => props.actions?.print !== false)
-const canDownload = computed(() => !!props.download && props.actions?.download !== false)
 
 interface Placed { id: string; sealId: string; name: string; src: string; pageNo: number; x: number; y: number }
 const placed = ref<Placed[]>([])
@@ -138,6 +203,15 @@ const valueOf = (key: string) => {
   if (!editor.value) return ''
   return (cmd().getControlValue({ conceptId: key })?.[0]?.value as string | undefined) ?? ''
 }
+/** 检查器里显示的值：下拉、单选、复选的值是 code，显示成选项文字（多选用顿号隔开） */
+const shownOf = (key: string) => {
+  void tick.value
+  if (!editor.value) return ''
+  const c = cmd().getControlValue({ conceptId: key })?.[0]
+  if (!c?.value) return ''
+  if (c.type !== 'select' && c.type !== 'radio' && c.type !== 'checkbox') return c.value
+  return c.value.split(',').map((code) => c.valueSets?.find((s) => s.code === code)?.value ?? code).join('、')
+}
 const readOne = (id: string) => (cmd().getControlValue({ id })?.[0]?.value as string | undefined) ?? ''
 const idsOf = (key: string) => [
   ...new Set(cmd().getControlList().filter((e) => e.control?.conceptId === key).map((e) => e.controlId!)),
@@ -151,10 +225,38 @@ const computedFor = (key: string, v: string) =>
   fields.filter((f) => f.computed?.fn === 'amountCN' && f.computed.from === key).map((f) => ({ conceptId: f.key, value: v ? toChineseAmount(v) : '' }))
 
 /**
- * 写字段值。文字类：同字段所有控件、计算字段一起写，一次命令，撤销时算一步。
- * 表格循环、图片：用 @oe/core 的 setFieldValues 改文档 JSON 再装回，浏览器和服务端同一套代码（方案 4.6）；装回会清空撤销历史
+ * 下拉、单选、复选按 code 写（编辑器只认 code）：给的是选项文字的换成 code，复选可以是数组或逗号隔开，和服务端 setFieldValues 一样。
+ * 选项按控件上的取（字典数据源的选项装在控件上），没有再按字段定义。
+ * strict：有不认识的选项就报错、这一批都不写（宿主 setData）；不 strict 时原样写（数据选择带出，和以前一样）
  */
-function setValues(values: Record<string, FieldValue>) {
+function optionCodes(values: Record<string, FieldValue>, strict: boolean): Record<string, FieldValue> {
+  const out: Record<string, FieldValue> = {}
+  for (const [key, v] of Object.entries(values)) {
+    const type = fieldOf(key)?.type
+    if ((type !== 'select' && type !== 'radio' && type !== 'checkbox') || v === null || v === undefined || v === '') {
+      out[key] = v
+      continue
+    }
+    const sets: { value: string; code: string }[] = cmd().getControlValue({ conceptId: key })?.[0]?.valueSets ?? fieldOf(key)?.options ?? []
+    const list = type === 'checkbox' ? (Array.isArray(v) ? v.map(String) : String(v).split(',')) : [String(v)]
+    out[key] = list
+      .map((raw) => {
+        const hit = sets.find((s) => s.code === raw) ?? sets.find((s) => s.value === raw)
+        if (!hit && strict) throw new Error(`字段 ${key} 没有选项「${raw}」，可选：${sets.map((s) => `${s.value}/${s.code}`).join('、')}`)
+        return hit?.code ?? raw
+      })
+      .join(',')
+  }
+  return out
+}
+
+/**
+ * 写字段值。文字类：同字段所有控件、计算字段一起写，一次命令，撤销时算一步。
+ * 表格循环、图片：用 @oe/core 的 setFieldValues 改文档 JSON 再装回，浏览器和服务端同一套代码（方案 4.6）；装回会清空撤销历史。
+ * 选项类先换成 code（optionCodes）
+ */
+function setValues(input: Record<string, FieldValue>, strict = false) {
+  const values = optionCodes(input, strict)
   const structural = Object.keys(values).filter((k) => ['loop', 'image'].includes(fieldOf(k)?.type ?? ''))
   if (structural.length) {
     const data = readDoc()
@@ -303,12 +405,15 @@ function moveThumb() {
 }
 async function setMode(next: Mode) {
   if (next === mode.value) return
+  closeFind()
   mode.value = next
   quiet()
   cmd().executeMode(EDITOR_MODE[next])
   applyPermissions()
   closePicker()
   menu.open = false
+  flagged.value = new Set()
+  emit('mode-change', next)
   await nextTick()
   moveThumb()
   renderHandles()
@@ -392,17 +497,26 @@ function locate(key: string) {
 const visibleFields = computed(() => fields.filter((f) => permOf(f.key) !== 'hidden' && f.type !== 'loop' && f.type !== 'image'))
 const fillable = computed(() => visibleFields.value.filter((f) => f.type !== 'computed' && permOf(f.key) !== 'readonly'))
 const filledCount = computed(() => fillable.value.filter((f) => valueOf(f.key)).length)
+/** 「下一项」：从当前字段往后找第一个没填的，到底了从头找 */
 function nextField() {
-  const next = fillable.value.find((f) => !valueOf(f.key))
+  const list = fillable.value
+  const from = active.value ? list.findIndex((f) => f.key === active.value!.conceptId) : -1
+  const next = [...list.slice(from + 1), ...list.slice(0, from + 1)].find((f) => !valueOf(f.key))
   if (next) locate(next.key)
 }
+/** 字段列表里没有值时显示的字：计算字段自动算，只读的由宿主带 */
+const emptyHint = (f: FieldDef) => (f.type === 'computed' ? '自动' : permOf(f.key) === 'readonly' ? '只读' : '未填')
+const isNumber = (v: string) => /^-?\d+(\.\d+)?$/.test(v.replace(/,/g, ''))
+const badFormat = (f: FieldDef, v: string) => (f.type === 'number' || f.type === 'amount') && !!v && !isNumber(v)
+// 上次校验时没填的必填字段、格式不对的字段：列表里标出来，改对了就不标
+const flagged = ref(new Set<string>())
+const isFlagged = (f: FieldDef) => flagged.value.has(f.key) && (!valueOf(f.key) || badFormat(f, valueOf(f.key)))
 
 /** 校验（验收 5）：必填字段为空、数字和金额不是数字时报错，定位到第一个 */
 function validate(): { ok: boolean; missing: string[]; invalid: string[] } {
   const missing = fields.filter((f) => permOf(f.key) === 'required' && !valueOf(f.key)).map((f) => f.key)
-  const invalid = fields
-    .filter((f) => (f.type === 'number' || f.type === 'amount') && permOf(f.key) !== 'hidden' && valueOf(f.key) && !/^-?\d+(\.\d+)?$/.test(valueOf(f.key).replace(/,/g, '')))
-    .map((f) => f.key)
+  const invalid = fields.filter((f) => permOf(f.key) !== 'hidden' && badFormat(f, valueOf(f.key))).map((f) => f.key)
+  flagged.value = new Set([...missing, ...invalid])
   const first = missing[0] ?? invalid[0]
   if (first) locate(first)
   return { ok: !missing.length && !invalid.length, missing, invalid }
@@ -490,16 +604,96 @@ function onSearch() {
   searchTimer = window.setTimeout(() => void loadPicker(), 200)
 }
 
-// ---------- 格式栏 ----------
-const FLEX: { key: IconName; value: RowFlex; label: string }[] = [
-  { key: 'left', value: RowFlex.LEFT, label: '左对齐' },
-  { key: 'center', value: RowFlex.CENTER, label: '居中' },
-  { key: 'right', value: RowFlex.RIGHT, label: '右对齐' },
-  { key: 'alignment', value: RowFlex.ALIGNMENT, label: '两端对齐' },
-]
-const TITLES: [string, string][] = [['', '正文'], [TitleLevel.FIRST, '标题 1'], [TitleLevel.SECOND, '标题 2'], [TitleLevel.THIRD, '标题 3']]
-const setTitle = (v: string) => cmd().executeTitle(v ? (v as TitleLevel) : null)
-const setSize = (v: string) => cmd().executeSize(Number(v))
+// ---------- 页面设置（格式栏「更多」里）：和导入 Word 换纸张一样，排版选项、页面尺寸、要存的 doc.page 一起换 ----------
+function applyPage(next: PageSetup) {
+  setPageLayout(next)
+  status.value = '已编辑'
+  void nextTick(renderHandles)
+}
+/** 换纸张、页边距、页码、水印：排版选项、页面尺寸、要存的 doc.page 一起换 */
+function setPageLayout(next: PageSetup | undefined) {
+  layout = layoutOptions(next)
+  Object.assign(PAGE, pageSize(next))
+  pageSetup.value = next
+  const c = cmd()
+  c.executePaperDirection(layout.paperDirection === 'horizontal' ? PaperDirection.HORIZONTAL : PaperDirection.VERTICAL)
+  c.executePaperSize(layout.width, layout.height)
+  c.executeSetPaperMargin([...layout.margins])
+  // 页码、水印没有单独的命令，用 updateOptions 换；要带上现在的全部选项，见 updateLayout
+  updateLayout({ pageNumber: layout.pageNumber, watermark: layout.watermark })
+}
+/**
+ * canvas-editor 的 updateOptions 会把没传的选项都换回它的默认值（模式、控件颜色、滚动容器、缩放……），
+ * 所以总是在现在的全部选项上盖要改的几项再传
+ */
+function updateLayout(patch: Partial<LayoutOptions>) {
+  cmd().executeUpdateOptions({ ...cmd().getOptions(), ...structuredClone(patch) } as never)
+}
+
+// ---------- 查找替换 ----------
+const findBar = ref<InstanceType<typeof FindBar>>()
+// 编辑模式带替换（Ctrl+H 把焦点放到替换框）；填写模式只查找
+const find = reactive({ open: false, toReplace: false, left: 0, top: 0, initial: '' })
+const canFind = computed(() => mode.value === 'edit' || mode.value === 'fill')
+/**
+ * 位置不挡格式栏和「下一项」：填写模式放在正文区右上角（格式栏藏着，页面上方那一条是空的）；
+ * 编辑模式放在格式栏下面、靠组件右边，盖住检查器上半截，不盖正文
+ */
+function findPosition() {
+  const canvas = canvasEl.value!.getBoundingClientRect()
+  if (mode.value !== 'edit') return { left: Math.max(8, canvas.right - 332), top: canvas.top + 12 }
+  const bar = root.value!.querySelector('.format-bar')!.getBoundingClientRect()
+  return { left: Math.max(8, root.value!.getBoundingClientRect().right - 336), top: bar.bottom + 8 }
+}
+function openFind(toReplace: boolean) {
+  if (!canFind.value) return
+  if (find.open) return findBar.value?.focus(toReplace)
+  // 选中了一段文字（不跨段）就用它当查找内容
+  const selected = cmd().getRangeText().trim()
+  Object.assign(find, { open: true, toReplace, ...findPosition(), initial: selected && !selected.includes('\n') ? selected : '' })
+}
+function closeFind() {
+  if (find.open) cmd().executeSearch(null)
+  find.open = false
+}
+
+// ---------- 大纲：按标题（标题 1～6）跳转，从状态栏往上弹 ----------
+const outline = reactive({ open: false, items: [] as { id: string; name: string; depth: number; pageNo: number }[], left: 0, bottom: 0 })
+async function toggleOutline(anchor: DOMRect) {
+  if (outline.open) return (outline.open = false)
+  const items: typeof outline.items = []
+  const walk = (list: ICatalogItem[], depth: number) => {
+    for (const c of list) {
+      items.push({ id: c.id, name: c.name.trim() || '（空标题）', depth, pageNo: c.pageNo })
+      walk(c.subCatalog, depth + 1)
+    }
+  }
+  walk((await cmd().getCatalog()) ?? [], 0)
+  Object.assign(outline, { open: true, items, left: Math.max(8, anchor.left), bottom: window.innerHeight - anchor.top + 8 })
+}
+/** 编辑、填写模式把光标放到标题上；盖章、只读（打印模式）光标放不进去，滚到标题所在的页 */
+function gotoOutline(item: { id: string; pageNo: number }) {
+  outline.open = false
+  if (cmd().getOptions().mode !== EditorMode.PRINT) {
+    cmd().executeLocationCatalog(item.id)
+    revealCursor()
+  } else pageCanvases()[item.pageNo]?.scrollIntoView({ block: 'start', behavior: reduceMotion() ? 'auto' : 'smooth' })
+}
+
+// ---------- 缩放 ----------
+function zoom(step: -1 | 0 | 1) {
+  if (step < 0) cmd().executePageScaleMinus()
+  else if (step > 0) cmd().executePageScaleAdd()
+  else cmd().executePageScaleRecovery()
+}
+// 字数：内容变了停一会儿再数
+let wordTimer = 0
+function countWords() {
+  clearTimeout(wordTimer)
+  wordTimer = window.setTimeout(async () => {
+    if (editor.value) words.value = await cmd().getWordCount()
+  }, 400)
+}
 
 // ---------- 可编辑区（方案 4.2）----------
 // 存在文档里的只有 area.extension = { anchor, editable }；能不能改、底色按当前模式现设（applyPermissions），保存时去掉。
@@ -655,7 +849,7 @@ function readValues(doc: DocData): Record<string, FieldValue> {
 }
 async function primary(publish = false) {
   if (saving.value) return
-  if (mode.value === 'view') return canDownload.value ? props.download!('pdf') : undefined
+  if (mode.value === 'view') return canExport.value ? exportFile('pdf') : undefined
   if (mode.value === 'fill') {
     const v = validate()
     if (!v.ok) {
@@ -683,6 +877,7 @@ async function primary(publish = false) {
     if (publish) await props.publish!()
     rememberAreas(all)
     status.value = publish ? '已发布' : DONE[mode.value]
+    emit('saved', { mode: payload.mode, published: publish })
   } catch (e) {
     status.value = e instanceof Error ? e.message : '保存失败'
     throw e
@@ -690,51 +885,169 @@ async function primary(publish = false) {
     saving.value = false
   }
 }
-// ---------- 导入 Word（s12）：宿主把 docx 交给服务端转换（渲染服务 /convert），这里换上文档、显示导入报告 ----------
+// ---------- 打开文件（编辑模式）：Word、HTML、Markdown、纯文本、JSON（files.ts）----------
+// Word：宿主传了 importDocx 就交给服务端转换（渲染服务 /convert，会数页数、查字体），否则在浏览器里用同一个插件和补丁转。
+// 打开文件就是换掉整篇文档（和打开 Word 一样），换上后显示导入报告
 const fileEl = ref<HTMLInputElement>()
 const report = shallowRef<ImportResult['report'] | null>(null)
-function pickDocx() {
+const FORMAT_NAMES: Record<ImportFormat, string> = { docx: 'Word', html: 'HTML', md: 'Markdown', txt: '纯文本', json: 'JSON' }
+function pickFile() {
   menu.open = false
   fileEl.value?.click()
 }
-async function onDocx(e: Event) {
+async function onFile(e: Event) {
   const input = e.target as HTMLInputElement
   const file = input.files?.[0]
   input.value = ''
-  if (!file || !props.importDocx) return
+  if (file) await importFile(file).catch(() => {})
+}
+/** 打开文件。不支持的格式、超过大小、内容不对时抛错，状态栏显示原因 */
+async function importFile(file: File): Promise<void> {
+  const format = importFormatOf(file.name)
+  const fail = (text: string) => {
+    status.value = text
+    throw new Error(text)
+  }
+  if (mode.value !== 'edit') return fail('编辑模式才能打开文件')
+  if (!format) return fail('不支持这种文件')
+  if (file.size > IMPORT_LIMIT) return fail('文件超过 20 MB')
   status.value = '正在导入'
   try {
-    const r = await props.importDocx(file)
-    layout = layoutOptions(r.doc.page)
-    Object.assign(PAGE, pageSize(r.doc.page))
-    pageSetup.value = r.doc.page
-    silently(() => {
-      cmd().executeUpdateOptions(structuredClone(layout) as never)
-      cmd().executeSetValue({ header: r.doc.header ?? [], main: r.doc.main, footer: r.doc.footer ?? [] })
-    })
-    placed.value = []
-    report.value = r.report
-    rememberAreas(collect().all)
-    // 长文档装完要排一阵版，排版引起的内容变化事件不算用户编辑
-    quietUntil = performance.now() + 2000
-    status.value = '已导入'
-  } catch {
+    if (format === 'docx') {
+      const r = props.importDocx ? await props.importDocx(file) : await importDocxInBrowser(await file.arrayBuffer())
+      return loadDocument(r.doc, r.report)
+    }
+    const text = await file.text()
+    if (format === 'json') {
+      const f = parseDocumentJson(text)
+      for (const def of f.fields) if (!fieldOf(def.key)) fields.push(def)
+      Object.assign(snapshots, f.values?.snapshots)
+      return loadDocument(f.doc, summary('json', f.doc))
+    }
+    const parts = format === 'txt' ? { main: textToElements(text) } : htmlToDoc(format === 'md' ? markdownToHtml(text) : text, innerWidth())
+    const doc = { header: [], footer: [], ...parts, page: pageSetup.value } as DocData
+    loadDocument(doc, summary(format, doc))
+  } catch (e) {
     status.value = '导入失败'
+    throw e
   }
+}
+/** 不是 Word 的文件也给一份简短的导入报告：导了多少字 */
+function summary(format: ImportFormat, doc: DocData): ImportResult['report'] {
+  const count = (list: IElement[] | undefined): number =>
+    (list ?? []).reduce((n, e) => n + String(e.value ?? '').replace(/\s/g, '').length + count(e.valueList) + (e.trList ?? []).reduce((m, tr) => m + tr.tdList.reduce((k, td) => k + count(td.value), 0), 0), 0)
+  return { items: [{ kind: 'text', level: 'ok', message: `已打开 ${FORMAT_NAMES[format]} 文件（${count(doc.main)} 字）` }], textExact: true }
+}
+/** 换上一整篇文档：纸张设置跟着换，印章按文档里的重新挂上 */
+function loadDocument(doc: DocData, rep: ImportResult['report'] | null) {
+  silently(() => {
+    setPageLayout(doc.page ?? pageSetup.value)
+    cmd().executeSetValue({ header: doc.header ?? [], main: doc.main, footer: doc.footer ?? [] })
+  })
+  placed.value = sealsOf(doc.main)
+  if (placed.value.length) silently(() => anchorSeals(editor.value!, plain(doc.main.filter((el) => placed.value.some((p) => p.id === el.id)) as unknown as SealElement[])))
+  applyPermissions()
+  report.value = rep
+  rememberAreas(collect().all)
+  // 长文档装完要排一阵版，排版引起的内容变化事件不算用户编辑
+  quietUntil = performance.now() + 2000
+  status.value = '已导入'
+}
+
+// ---------- 下载：各格式的文件内容；PDF、Word 宿主接了服务端时走宿主 ----------
+// 下载按令牌（actions.download）；不给也能下载。打印同理
+const canExport = computed(() => props.actions?.download !== false)
+const EXPORTS = computed<{ format: ExportFormat; label: string; hint?: string }[]>(() => [
+  { format: 'pdf', label: 'PDF', hint: props.download ? undefined : '图片版' },
+  { format: 'docx', label: 'Word' },
+  { format: 'html', label: 'HTML' },
+  { format: 'txt', label: '纯文本' },
+  { format: 'png', label: '图片', hint: '每页一张' },
+  ...(mode.value === 'edit' ? [{ format: 'json' as const, label: 'JSON', hint: '文档和字段' }] : []),
+])
+/** 打印模式（盖章、只读）下有的取值命令取不到控件，先切到编辑模式取完再切回（和 readDoc 一样） */
+function inEditMode<T>(fn: () => T): T {
+  const m = cmd().getOptions().mode
+  if (m !== EditorMode.PRINT) return fn()
+  let out!: T
+  silently(() => {
+    cmd().executeMode(EditorMode.EDIT)
+    try {
+      out = fn()
+    } finally {
+      cmd().executeMode(m)
+    }
+  })
+  return out
+}
+/**
+ * 导出 HTML、纯文本和 SDK 的 getText 用的三块内容。有复选、单选控件时按保存的文档在不显示的编辑器里取（勾写成 ☑ ☐，见 docParts），
+ * 没有时两种取法结果一样，直接取当前编辑器的，省掉重新排版
+ */
+function partsOf(kind: 'html' | 'text') {
+  const doc = readDoc() as unknown as DocData
+  if (hasChoices(doc)) return docParts({ ...doc, page: pageSetup.value ? plain(pageSetup.value) : undefined }, kind)
+  return inEditMode(() => (kind === 'html' ? cmd().getHTML() : cmd().getText()))
+}
+const docTitle = () => props.title ?? '未命名'
+/** 打印模式的页面图，按 2 倍出；缩放过的先按比例补回来 */
+const pageImages = async () => (await cmd().getImage({ pixelRatio: 2 / scale.value, mode: EditorMode.PRINT })) as string[]
+/** 各格式的文件内容（都在浏览器里生成）。SDK 的 export 用它 */
+async function fileBlob(format: ExportFormat): Promise<Blob> {
+  if (format === 'pdf') return pdfFromImages(await pageImages(), PAGE, docTitle())
+  if (format === 'png') return zipImages(await pageImages(), docTitle())
+  if (format === 'docx') return exportDocxInBrowser(collect().payload.doc)
+  if (format === 'html') return new Blob([htmlDocument(docTitle(), partsOf('html'), pageSetup.value)], { type: MIME.html })
+  if (format === 'txt') return new Blob([textDocument(partsOf('text'))], { type: MIME.txt })
+  const { doc, fields: defs, values } = collect().payload
+  const file: DocumentFile = { format: 'oe-document', version: 1, title: docTitle(), doc, fields: defs, values }
+  return new Blob([JSON.stringify(file, null, 1)], { type: MIME.json })
+}
+/** 下载一种格式。PDF、Word：宿主传了 download 就交给宿主（服务端出，带文字层、核对页数），否则浏览器里生成 */
+async function exportFile(format: ExportFormat): Promise<void> {
+  menu.open = false
+  if (!canExport.value) throw new Error('这个文档不能下载')
+  if ((format === 'pdf' || format === 'docx') && props.download) return props.download(format)
+  const before = status.value
+  status.value = '正在导出'
+  try {
+    downloadBlob(await fileBlob(format), `${safeName(docTitle())}.${EXTENSION[format]}`)
+    status.value = before
+  } catch (e) {
+    status.value = '导出失败'
+    throw e
+  }
+}
+function print() {
+  menu.open = false
+  if (canPrint.value) void cmd().executePrint()
 }
 function openMenu() {
   if (menu.open) return (menu.open = false)
   const r = exportBtn.value!.getBoundingClientRect()
-  Object.assign(menu, { open: true, left: r.right - 160, top: r.bottom + 8 })
+  Object.assign(menu, { open: true, left: Math.max(8, r.right - 240), top: r.bottom + 8 })
 }
 
 // ---------- 印章 ----------
+/** 文档里已有的印章：带 extension.seal 的浮动图片 */
+function sealsOf(main: IElement[]): Placed[] {
+  const out: Placed[] = []
+  for (const el of main as (IElement & { extension?: { seal?: { sealId: string; name: string } } })[]) {
+    const seal = el.extension?.seal
+    if (el.type === 'image' && seal && el.id && el.imgFloatPosition) {
+      const { x, y, pageNo = 0 } = el.imgFloatPosition as { x: number; y: number; pageNo?: number }
+      out.push({ id: el.id, sealId: seal.sealId, name: seal.name, src: el.value, pageNo, x, y })
+    }
+  }
+  return out
+}
 const pageCanvases = () => [...(docEl.value?.querySelectorAll<HTMLCanvasElement>('.ce-page-container canvas') ?? [])]
+/** 屏幕坐标 → 第几页、页内坐标。页内坐标按缩放 100% 算（印章存的就是这个），缩放后先除掉比例 */
 function pageAt(x: number, y: number) {
   const pages = pageCanvases()
   for (let i = 0; i < pages.length; i++) {
     const r = pages[i]!.getBoundingClientRect()
-    if (x >= r.left && x <= r.right && y >= r.top && y <= r.bottom) return { pageNo: i, x: x - r.left, y: y - r.top }
+    if (x >= r.left && x <= r.right && y >= r.top && y <= r.bottom) return { pageNo: i, x: (x - r.left) / scale.value, y: (y - r.top) / scale.value }
   }
   return null
 }
@@ -817,9 +1130,10 @@ function renderHandles() {
   if (mode.value !== 'seal' || !pagesEl.value) return (handles.value = [])
   const origin = pagesEl.value.getBoundingClientRect()
   const pages = pageCanvases()
+  const k = scale.value
   handles.value = placed.value.flatMap((s) => {
     const r = pages[s.pageNo]?.getBoundingClientRect()
-    return r ? [{ ...s, left: r.left - origin.left + s.x, top: r.top - origin.top + s.y }] : []
+    return r ? [{ ...s, left: r.left - origin.left + s.x * k, top: r.top - origin.top + s.y * k }] : []
   })
 }
 function dragHandle(e: PointerEvent, id: string) {
@@ -852,6 +1166,69 @@ function onDrop(e: DragEvent) {
   dropSeal(e.dataTransfer!.getData('text/plain'), e.clientX, e.clientY)
 }
 
+// ---------- 给宿主的事件和方法（07 第 4 节；SDK 和 iframe 嵌入共用）----------
+// change：用户改了内容（停 300 毫秒发一次）；field-change：字段值变了（不管是用户填的、选的，还是宿主 setData），按 key 比对
+let changeTimer = 0
+const scheduleChange = () => {
+  clearTimeout(changeTimer)
+  changeTimer = window.setTimeout(() => emit('change'), 300)
+}
+let lastValues: Record<string, FieldValue> = {}
+let diffTimer = 0
+function scheduleDiff() {
+  clearTimeout(diffTimer)
+  diffTimer = window.setTimeout(() => {
+    if (!editor.value) return
+    const now = readValues(readDoc() as unknown as DocData)
+    for (const key of new Set([...Object.keys(lastValues), ...Object.keys(now)]))
+      if (JSON.stringify(now[key] ?? null) !== JSON.stringify(lastValues[key] ?? null)) emit('field-change', { key, value: now[key] ?? null, previous: lastValues[key] ?? null })
+    lastValues = now
+  }, 250)
+}
+watch(dirty, (d) => emit('dirty-change', d))
+watch(
+  () => active.value?.conceptId,
+  (key) => emit('field-focus', key ? { key, label: fieldOf(key)?.label ?? key } : null),
+)
+
+/** 批量操作（和服务端 /operations 同一套操作库）：在副本上执行，全部成功才换上；编辑模式才能用，换上后撤销历史清空 */
+function apply(ops: Op[]): BatchResult {
+  if (mode.value !== 'edit') throw new Error('编辑模式才能批量操作')
+  const r = applyBatch(collect().payload.doc, ops, { fields: plain(fields) })
+  if (!r.ok) return r
+  silently(() => cmd().executeSetValue({ header: r.data.header ?? [], main: r.data.main, footer: r.data.footer ?? [] }))
+  placed.value = sealsOf(r.data.main)
+  applyPermissions()
+  status.value = '已编辑'
+  scheduleDiff()
+  return r
+}
+/** 找第 occurrence 处（从 0 起）文字并选中，滚到能看见；没有返回 false */
+function findText(text: string, occurrence = 0): boolean {
+  const range = text ? cmd().getKeywordRangeList(text)[occurrence] : undefined
+  if (!range) return false
+  cmd().executeReplaceRange(range)
+  revealCursor()
+  return true
+}
+/** 在光标处插文字（编辑模式；填写模式只能插在字段和可编辑区里，由编辑器管） */
+function insertText(text: string) {
+  if (mode.value !== 'edit' && mode.value !== 'fill') throw new Error('盖章、只读模式不能插文字')
+  if (cmd().getRange().startIndex < 0) cmd().executeSetRange(0, 0)
+  cmd().executeInsertElementList([{ value: text }])
+}
+/** 在光标处插一个字段：先找模板里已有的，再找宿主字段库（带出、计算的依赖一起登记） */
+function insertFieldByKey(key: string) {
+  if (mode.value !== 'edit') throw new Error('编辑模式才能插字段')
+  const own = fieldOf(key)
+  if (own) return insertField(own)
+  const lib = props.libraryFields?.find((f) => f.key === key)
+  if (!lib) throw new Error(`没有字段 ${key}`)
+  insertLibraryField(lib)
+}
+const allTextOf = () => textDocument(partsOf('text'))
+const focusEditor = () => docEl.value?.querySelector<HTMLElement>('.ce-inputarea')?.focus({ preventScroll: true })
+
 // ---------- 生命周期 ----------
 function onKeydownCapture(e: KeyboardEvent) {
   design.keydown(e)
@@ -871,6 +1248,7 @@ function onPointerDown(e: PointerEvent) {
   if (design.floating.open && !(t as Element).closest?.('.selection-toolbar')) design.floating.open = false
   if (picker.open && !pickerEl.value?.contains(t)) closePicker()
   if (menu.open && !exportBtn.value?.contains(t) && !(t as Element).closest?.('.menu')) menu.open = false
+  if (outline.open && !(t as Element).closest?.('.outline-pop, .oe-outline')) outline.open = false
   if (draft.open && !draftEl.value?.contains(t) && !addBtn.value?.contains(t)) draft.open = false
 }
 
@@ -878,6 +1256,8 @@ onMounted(async () => {
   const accent = getComputedStyle(root.value!).getPropertyValue('--oe-accent').trim() || '#007aff'
   const e = new Editor(docEl.value!, structuredClone(props.doc) as unknown as IElement[], {
     ...(structuredClone(layout) as unknown as IEditorOption),
+    // 滚动的是 .canvas，不是整个页面：当前页码（状态栏）和拖选到边上时自动滚动都按它算。一个页面上可能有几个编辑器，按各自的标记找
+    scrollContainerSelector: `[data-oe-scroll="${scrollId}"]`,
     marginIndicatorColor: 'transparent',
     rangeColor: accent,
     rangeAlpha: 0.2,
@@ -908,7 +1288,11 @@ onMounted(async () => {
   }
   e.listener.contentChange = () => {
     blankRevision.value++
-    if (!applying && performance.now() > quietUntil) status.value = '已编辑'
+    scheduleDiff()
+    if (!applying && performance.now() > quietUntil) {
+      status.value = '已编辑'
+      scheduleChange()
+    }
   }
   e.listener.controlChange = (p) => {
     // 程序挪光标（同步时保持光标位置）引起的，不当成用户点了控件
@@ -920,7 +1304,11 @@ onMounted(async () => {
     else closePicker()
   }
   e.listener.rangeStyleChange = (s: IRangeStyle) => {
-    Object.assign(style, { bold: !!s.bold, italic: !!s.italic, underline: !!s.underline, list: s.listType === ListType.OL, rowFlex: s.rowFlex ?? 'left', size: s.size, level: s.level ?? '' })
+    Object.assign(style, {
+      bold: !!s.bold, italic: !!s.italic, underline: !!s.underline, strikeout: !!s.strikeout, type: s.type ?? '', font: s.font, size: s.size,
+      color: s.color, highlight: s.highlight, rowFlex: s.rowFlex ?? 'left', rowMargin: s.rowMargin, listType: s.listType ?? '', level: s.level ?? '',
+      painter: !!s.painter, undo: !!s.undo, redo: !!s.redo,
+    })
     if (mode.value !== 'edit') return
     const area = e.command.getAreaValue()
     const on = isEditable(area?.area as AreaProps | undefined)
@@ -928,42 +1316,79 @@ onMounted(async () => {
     Object.assign(style, { area: on, canArea: area ? on || canBeArea(area.value) : plainSelection().length > 0 })
     design.refresh()
   }
-  // 已有的印章：带 extension.seal 的浮动图片
-  for (const el of props.doc.main as unknown as (IElement & { extension?: { seal?: { sealId: string; name: string } } })[]) {
-    const seal = el.extension?.seal
-    if (el.type === 'image' && seal && el.id && el.imgFloatPosition) {
-      const { x, y, pageNo = 0 } = el.imgFloatPosition as { x: number; y: number; pageNo?: number }
-      placed.value.push({ id: el.id, sealId: seal.sealId, name: seal.name, src: el.value, pageNo, x, y })
-    }
-  }
+  placed.value = sealsOf(props.doc.main)
   // 印章挂到各自那一页（服务端放的章在正文末尾），见 seals.ts
   const docSeals = (props.doc.main as unknown as SealElement[]).filter((el) => placed.value.some((p) => p.id === el.id))
   silently(() => anchorSeals(e, plain(docSeals)))
   applyPermissions()
   rememberAreas(collect().all)
+  // 状态栏。这几个用事件总线订阅，不占 listener 上的回调（宿主经 handle.editor 可能要用）
+  e.eventBus.on('pageScaleChange', (s) => {
+    scale.value = s
+    void nextTick(renderHandles)
+  })
+  e.eventBus.on('intersectionPageNoChange', (n) => (pageNo.value = n))
+  e.eventBus.on('pageSizeChange', (n) => (pageCount.value = n))
+  e.eventBus.on('contentChange', countWords)
+  pageCount.value = Math.max(1, pageCanvases().length)
+  countWords()
   docEl.value!.addEventListener('keydown', onKeydownCapture, true)
+  root.value!.addEventListener('keydown', onRootKeydown, true)
   window.addEventListener('keydown', onWindowKey, true)
   window.addEventListener('pointerdown', onPointerDown)
   window.addEventListener('resize', onResize)
+  window.addEventListener('beforeunload', onBeforeUnload)
   await nextTick()
   moveThumb()
   renderHandles()
+  lastValues = readValues(readDoc() as unknown as DocData)
+  emit('ready')
 })
 const onResize = () => {
   moveThumb()
   renderHandles()
 }
+/**
+ * 焦点在编辑器里（正文、侧栏、弹层）时的快捷键：保存、查找替换、打印。焦点在宿主页面别处时不拦。
+ * 填写模式的保存就是提交（先校验）；打印按令牌的打印权限，没有权限时什么都不做
+ */
+function onRootKeydown(e: KeyboardEvent) {
+  if (!(e.ctrlKey || e.metaKey) || e.altKey || e.isComposing) return
+  const key = e.key.toLowerCase()
+  const take = () => {
+    e.preventDefault()
+    e.stopPropagation()
+  }
+  if (key === 's') {
+    take()
+    if (mode.value !== 'view') primary().catch(() => {})
+  } else if ((key === 'f' || key === 'h') && canFind.value) {
+    take()
+    openFind(key === 'h')
+  } else if (key === 'p') {
+    take()
+    if (canPrint.value) void cmd().executePrint()
+  }
+}
+function onBeforeUnload(e: BeforeUnloadEvent) {
+  if (!dirty.value || props.confirmLeave === false || mode.value === 'view') return
+  e.preventDefault()
+  e.returnValue = ''
+}
 onBeforeUnmount(() => {
+  clearTimeout(wordTimer)
   window.removeEventListener('keydown', onWindowKey, true)
   window.removeEventListener('pointerdown', onPointerDown)
   window.removeEventListener('resize', onResize)
+  window.removeEventListener('beforeunload', onBeforeUnload)
   editor.value?.destroy()
 })
 
 defineExpose({
   editor,
   setMode,
-  setValues,
+  // 宿主 setData：选项不认识就报错，不写
+  setValues: (values: Record<string, FieldValue>) => setValues(values, true),
   validate,
   getData: data,
   save: primary,
@@ -971,6 +1396,17 @@ defineExpose({
   moveSeal,
   locate,
   placed,
+  isDirty: () => dirty.value,
+  apply,
+  find: findText,
+  insertText,
+  insertField: insertFieldByKey,
+  getText: allTextOf,
+  exportFile: fileBlob,
+  download: exportFile,
+  importFile,
+  print,
+  focus: focusEditor,
 })
 </script>
 
@@ -979,8 +1415,13 @@ defineExpose({
     <!-- editor-component：canvas-editor 约定的标记，点这些区域时编辑器不清掉光标、选区和当前控件 -->
     <header class="toolbar" editor-component="component">
       <div class="toolbar-leading">
-        <span class="doc-title">{{ title ?? '未命名' }}</span>
-        <span class="doc-status">{{ status }}</span>
+        <span class="doc-title" :title="title ?? '未命名'">{{ title ?? '未命名' }}</span>
+        <span class="doc-status" :class="{ attention }" role="status">{{ status }}</span>
+        <!-- 撤销、重做放在左上角（Word、WPS 的快速访问栏也在这里）；走 undoRedo，同字段撤销后仍一致 -->
+        <span v-if="mode === 'edit' || mode === 'fill'" class="history" @mousedown.prevent>
+          <button type="button" class="icon-button oe-undo" aria-label="撤销" :title="tip('撤销', shortcut('Z'))" :disabled="!style.undo" @click="undoRedo(false)"><OeIcon name="undo" /></button>
+          <button type="button" class="icon-button oe-redo" aria-label="重做" :title="tip('重做', shortcut('Y'))" :disabled="!style.redo" @click="undoRedo(true)"><OeIcon name="redo" /></button>
+        </span>
       </div>
       <div v-if="shownModes.length > 1" ref="modesEl" class="segmented" role="tablist">
         <span class="segmented-thumb" aria-hidden="true" :style="{ width: `${thumb.width}px`, transform: `translateX(${thumb.x}px)` }"></span>
@@ -990,9 +1431,10 @@ defineExpose({
       </div>
       <div v-else></div>
       <div class="toolbar-trailing">
-        <button v-if="mode === 'view' && canPrint" type="button" class="icon-button oe-print" aria-label="打印" title="打印" @click="cmd().executePrint()"><OeIcon name="print" /></button>
-        <button v-if="canDownload || (mode === 'edit' && importDocx)" ref="exportBtn" type="button" class="icon-button oe-export" aria-label="导出" title="导出" @click.stop="openMenu"><OeIcon name="export" /></button>
-        <button v-if="mode !== 'view' || canDownload" type="button" class="oe-primary" :class="publish && mode === 'edit' ? 'button-tinted' : 'button-primary'" :disabled="saving" @click="primary()">{{ publish && mode === 'edit' ? '保存草稿' : PRIMARY[mode] }}</button>
+        <button v-if="canFind" type="button" class="icon-button oe-find" aria-label="查找" :title="tip(mode === 'edit' ? '查找替换' : '查找', shortcut('F'))" :aria-expanded="find.open" @mousedown.prevent @click="find.open ? closeFind() : openFind(false)"><OeIcon name="search" /></button>
+        <button v-if="mode === 'view' && canPrint" type="button" class="icon-button oe-print" aria-label="打印" :title="tip('打印', shortcut('P'))" @click="cmd().executePrint()"><OeIcon name="print" /></button>
+        <button v-if="mode === 'edit' || canExport" ref="exportBtn" type="button" class="icon-button oe-export" aria-label="导出" :title="mode === 'edit' ? '打开、下载、打印' : '下载、打印'" :aria-expanded="menu.open" @click.stop="openMenu"><OeIcon name="export" /></button>
+        <button v-if="mode !== 'view' || canExport" type="button" class="oe-primary" :class="publish && mode === 'edit' ? 'button-tinted' : 'button-primary'" :disabled="saving" @click="primary()">{{ publish && mode === 'edit' ? '保存草稿' : PRIMARY[mode] }}</button>
         <button v-if="publish && mode === 'edit'" type="button" class="button-primary" :disabled="saving" @click="primary(true)">发布模板</button>
         <button v-if="mode === 'edit' && previewSamples?.length" type="button" class="button-tinted" @click="preview = data().doc">预览</button>
       </div>
@@ -1002,31 +1444,23 @@ defineExpose({
       <TemplateFields v-if="mode === 'edit' && libraryFields" :fields="libraryFields" @insert="insertLibraryField">
         <TemplateBlanks v-if="report && editor" :editor="editor" :revision="blankRevision" @select="selectBlank" />
       </TemplateFields>
-      <main ref="canvasEl" class="canvas" :class="{ 'drop-target': dropTarget }" @dragover.prevent="dropTarget = mode === 'seal' || (mode === 'edit' && !!libraryFields)" @dragleave="dropTarget = false" @drop.capture="design.drop($event); dropTarget = false" @drop="onDrop" @scroll.passive="renderHandles">
-        <div class="format-bar" role="toolbar" aria-label="格式" editor-component="component" :aria-hidden="mode !== 'edit'" @mousedown.prevent>
-          <select aria-label="样式" :value="style.level" @change="setTitle(($event.target as HTMLSelectElement).value)">
-            <option v-for="[v, n] in TITLES" :key="v" :value="v">{{ n }}</option>
-          </select>
-          <select aria-label="字号" :value="String(style.size)" @change="setSize(($event.target as HTMLSelectElement).value)">
-            <option v-for="s in [12, 14, 16, 18, 20, 24]" :key="s" :value="String(s)">{{ s }}</option>
-          </select>
-          <span class="group">
-            <button type="button" class="fmt" aria-label="加粗" :aria-pressed="style.bold" @click="cmd().executeBold()"><b>B</b></button>
-            <button type="button" class="fmt" aria-label="斜体" :aria-pressed="style.italic" @click="cmd().executeItalic()"><i>I</i></button>
-            <button type="button" class="fmt" aria-label="下划线" :aria-pressed="style.underline" @click="cmd().executeUnderline()"><u>U</u></button>
-          </span>
-          <span class="group">
-            <button v-for="f in FLEX" :key="f.key" type="button" class="fmt" :aria-label="f.label" :aria-pressed="style.rowFlex === f.key" @click="cmd().executeRowFlex(f.value)"><OeIcon :name="f.key" /></button>
-          </span>
-          <span class="group">
-            <button type="button" class="fmt" aria-label="编号" :aria-pressed="style.list" @click="cmd().executeList(ListType.OL)"><OeIcon name="list" /></button>
-            <button v-if="libraryFields" type="button" class="button-tinted" :disabled="!design.selection.value" @click="design.open()">设为字段</button>
-            <button type="button" class="fmt" aria-label="表格" @click="cmd().executeInsertTable(3, 3)"><OeIcon name="table" /></button>
-            <button type="button" class="fmt" aria-label="可编辑区" title="可编辑区" :aria-pressed="style.area" :disabled="!style.canArea" @click="toggleArea"><OeIcon name="area" /></button>
-          </span>
-        </div>
-        <input ref="fileEl" type="file" accept=".docx,application/vnd.openxmlformats-officedocument.wordprocessingml.document" hidden @change="onDocx" />
-        <div ref="pagesEl" class="pages" :style="{ width: `${PAGE.width}px` }">
+      <main ref="canvasEl" class="canvas" :data-oe-scroll="scrollId" :class="{ 'drop-target': dropTarget }" @dragover.prevent="dropTarget = mode === 'seal' || (mode === 'edit' && !!libraryFields)" @dragleave="dropTarget = false" @drop.capture="design.drop($event); dropTarget = false" @drop="onDrop" @scroll.passive="renderHandles">
+        <FormatBar
+          :editor="editor"
+          :state="style"
+          :active="mode === 'edit'"
+          :field-button="!!libraryFields"
+          :can-field="design.selection.value"
+          :page="pageSetup"
+          :content-width="innerWidth"
+          @area="toggleArea"
+          @field="design.open()"
+          @page="applyPage"
+          @notice="(text: string) => (status = text)"
+        />
+        <input ref="fileEl" type="file" :accept="IMPORT_ACCEPT" hidden @change="onFile" />
+        <!-- 宽度跟着编辑器（canvas-editor 按纸张和缩放设 .doc 的宽） -->
+        <div ref="pagesEl" class="pages">
           <div ref="docEl" class="doc" @mouseup="design.mouseup"></div>
           <div v-if="mode === 'seal'" class="seal-layer">
             <div
@@ -1035,7 +1469,7 @@ defineExpose({
               class="seal-handle"
               :class="{ dragging: dragging === h.id }"
               :data-id="h.id"
-              :style="{ left: `${h.left}px`, top: `${h.top}px`, width: `${SEAL_SIZE}px`, height: `${SEAL_SIZE}px` }"
+              :style="{ left: `${h.left}px`, top: `${h.top}px`, width: `${SEAL_SIZE * scale}px`, height: `${SEAL_SIZE * scale}px` }"
               @pointerdown="dragHandle($event, h.id)"
             >
               <img :src="h.src" alt="" />
@@ -1082,11 +1516,15 @@ defineExpose({
         <div v-else-if="mode === 'fill'" class="inspector-body">
           <div class="progress">
             <span class="progress-count">{{ filledCount }} / {{ fillable.length }}</span>
-            <button type="button" class="button-tinted" @click="nextField">下一项</button>
+            <button type="button" class="button-tinted" :disabled="filledCount === fillable.length" @click="nextField">下一项</button>
+          </div>
+          <div class="progress-track" role="progressbar" aria-label="填写进度" :aria-valuenow="filledCount" aria-valuemin="0" :aria-valuemax="fillable.length">
+            <span :style="{ width: `${fillable.length ? (filledCount / fillable.length) * 100 : 100}%` }"></span>
           </div>
           <ul class="rows">
-            <li v-for="f in visibleFields" :key="f.key" class="row" :class="{ active: active?.conceptId === f.key }" :data-locate="f.key" @click="locate(f.key)">
-              <span>{{ f.label }}</span><span class="row-value" :class="{ empty: !valueOf(f.key) }">{{ valueOf(f.key) || '未填' }}</span>
+            <li v-for="f in visibleFields" :key="f.key" class="row" :class="{ active: active?.conceptId === f.key, flagged: isFlagged(f) }" :data-locate="f.key" @click="locate(f.key)">
+              <span class="row-label">{{ f.label }}<span v-if="permOf(f.key) === 'required'" class="row-tag">必填</span></span>
+              <span class="row-value" :class="{ empty: !valueOf(f.key) }">{{ shownOf(f.key) || emptyHint(f) }}</span>
             </li>
           </ul>
         </div>
@@ -1115,12 +1553,33 @@ defineExpose({
         </div>
       </aside>
     </div>
+    <StatusBar :page-no="pageNo" :page-count="pageCount" :words="words" :scale="scale" :outline-open="outline.open" @zoom="zoom" @outline="toggleOutline" />
 
     <div v-if="mode === 'edit' && design.floating.open" class="popover selection-toolbar" editor-component="component" :style="{ left: `${design.floating.left}px`, top: `${design.floating.top}px` }" @mousedown.prevent>
       <button type="button" class="button-tinted" @click="design.open()">设为字段</button>
       <button type="button" class="button-tinted" :disabled="!style.canArea" @click="toggleArea(); design.floating.open = false">可编辑区</button>
-      <button type="button" class="fmt" aria-label="加粗选区" @click="cmd().executeBold()"><b>B</b></button>
+      <button type="button" class="fmt" aria-label="加粗选区" :title="tip('加粗', shortcut('B'))" :aria-pressed="style.bold" @click="cmd().executeBold()"><b>B</b></button>
+      <button type="button" class="fmt" aria-label="斜体选区" :title="tip('斜体', shortcut('I'))" :aria-pressed="style.italic" @click="cmd().executeItalic()"><i>I</i></button>
+      <button type="button" class="fmt" aria-label="下划线选区" :title="tip('下划线', shortcut('U'))" :aria-pressed="style.underline" @click="cmd().executeUnderline()"><u>U</u></button>
     </div>
+    <div v-if="outline.open" class="popover outline-pop" role="navigation" aria-label="大纲" editor-component="component" :style="{ left: `${outline.left}px`, bottom: `${outline.bottom}px`, top: 'auto', transformOrigin: 'bottom left' }">
+      <ul v-if="outline.items.length" class="rows outline-rows">
+        <li v-for="(it, i) in outline.items" :key="i"><button type="button" class="row" :style="{ paddingLeft: `${8 + it.depth * 16}px` }" @click="gotoOutline(it)"><span>{{ it.name }}</span><span class="row-meta">{{ it.pageNo + 1 }}</span></button></li>
+      </ul>
+      <p v-else class="empty-note">没有标题</p>
+    </div>
+    <FindBar
+      v-if="find.open && editor"
+      ref="findBar"
+      :editor="editor"
+      :replace="mode === 'edit'"
+      :focus-replace="find.toReplace"
+      :left="find.left"
+      :top="find.top"
+      :initial="find.initial"
+      @close="find.open = false"
+      @edited="status = '已编辑'"
+    />
     <div v-if="mode === 'edit' && design.chooser.open" class="popover field-chooser" editor-component="component" :style="{ left: `${design.chooser.left}px`, top: `${design.chooser.top}px` }">
       <div class="field-chooser-title"><span>设为字段</span><button type="button" class="icon-button small" aria-label="关闭字段选择" @click="design.cancel"><OeIcon name="xmark" /></button></div>
       <TemplateFields :fields="libraryFields!" autofocus @insert="design.choose" @query="design.search" @cancel="design.cancel" />
@@ -1158,11 +1617,18 @@ defineExpose({
         <button type="button" class="icon-button small" aria-label="下一页" :disabled="picker.page >= picker.pages - 1" @click="turn(1)"><OeIcon name="chevronRight" /></button>
       </div>
     </div>
-    <div v-if="menu.open" class="popover menu" role="menu" editor-component="component" :style="{ left: `${menu.left}px`, top: `${menu.top}px` }">
-      <button v-if="mode === 'edit' && importDocx" type="button" role="menuitem" data-import @click="pickDocx">导入 Word</button>
-      <template v-if="canDownload">
-        <button type="button" role="menuitem" @click="(menu.open = false), download?.('pdf')">PDF</button>
-        <button type="button" role="menuitem" @click="(menu.open = false), download?.('docx')">Word</button>
+    <div v-if="menu.open" class="popover menu file-menu" role="menu" aria-label="文件" editor-component="component" :style="{ left: `${menu.left}px`, top: `${menu.top}px` }">
+      <template v-if="mode === 'edit'">
+        <button type="button" role="menuitem" data-import @click="pickFile"><span>打开文件</span><span class="menu-shortcut">Word、HTML、Markdown…</span></button>
+        <div v-if="canExport || canPrint" class="menu-divider" role="separator"></div>
+      </template>
+      <template v-if="canExport">
+        <div class="menu-label">下载</div>
+        <button v-for="f in EXPORTS" :key="f.format" type="button" role="menuitem" :data-export="f.format" @click="exportFile(f.format).catch(() => {})"><span>{{ f.label }}</span><span v-if="f.hint" class="menu-shortcut">{{ f.hint }}</span></button>
+      </template>
+      <template v-if="canPrint">
+        <div v-if="canExport" class="menu-divider" role="separator"></div>
+        <button type="button" role="menuitem" data-print @click="print"><span>打印</span><span class="menu-shortcut">{{ shortcut('P') }}</span></button>
       </template>
     </div>
   </div>

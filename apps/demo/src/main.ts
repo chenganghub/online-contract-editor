@@ -2,11 +2,11 @@
 // 地址带 ?doc=<文档 id> 时接真实服务端（server-host.ts；本机用 scripts/stack.ts 起整套环境），否则文档存在 localStorage
 import { createEditor, type DocActions, type DocData, type DocValues, type FieldDef, type Mode, type Permission, type RequestFn, type SealOp } from '@oe/web'
 import { CUSTOMERS, HOST_TOKEN, queryCustomers } from './customers'
-import { DATA_SOURCES, FIELDS, demoSeals, sampleDoc } from './sample'
+import { DATA_SOURCES, demoSeals } from './sample'
+import { SAMPLES } from './samples'
 import { showPagesNotice } from './pages'
 import { connectServer, connectTemplate, type HostFunctions } from './server-host'
 const pages = import.meta.env.MODE === 'pages'
-const KEY = 'oe-demo-document'
 interface Stored {
   doc: DocData
   values: DocValues
@@ -16,6 +16,9 @@ interface Stored {
 const MODES: Mode[] = ['edit', 'fill', 'seal', 'view']
 const PERMS: Permission[] = ['editable', 'readonly', 'required', 'hidden']
 const params = new URLSearchParams(location.search)
+// 合同范本：?sample=sales|service|lease|nda，不给是采购合同。采购合同沿用原来的存储键（端到端测试按它读写），其他范本各存各的
+const sample = SAMPLES.find((s) => s.id === params.get('sample')) ?? SAMPLES[0]!
+const KEY = sample.id === 'purchase' ? 'oe-demo-document' : `oe-demo-document:${sample.id}`
 const asked = params.get('mode') as Mode | null
 const mode = asked && MODES.includes(asked) ? asked : null
 const permissions = Object.fromEntries(
@@ -61,7 +64,7 @@ const local: HostFunctions = {
   load: async () => {
     const saved = localStorage.getItem(KEY)
     const s: Stored | null = saved ? JSON.parse(saved) : null
-    return { title: '采购合同', doc: s?.doc ?? sampleDoc(), values: s?.values, fields: s?.fields ?? FIELDS, libraryFields: pages ? FIELDS : undefined, permissions, actions }
+    return { title: sample.title, doc: s?.doc ?? sample.doc(), values: s?.values, fields: s?.fields ?? sample.fields, libraryFields: pages ? sample.fields : undefined, permissions, actions }
   },
   save: async ({ doc, values, fields }) => {
     localStorage.setItem(KEY, JSON.stringify({ doc, values, fields } satisfies Stored))
@@ -73,7 +76,7 @@ const local: HostFunctions = {
 }
 
 const el = document.querySelector<HTMLElement>('#app')!
-if (pages) showPagesNotice(KEY)
+if (pages) showPagesNotice(KEY, SAMPLES, sample.id)
 let docId = params.get('doc')
 let openingMode = mode ?? 'edit'
 const templateId = params.get('template')
@@ -89,12 +92,7 @@ try {
     history.replaceState(null, '', `?${params}`)
   }
   const host = templateId ? await connectTemplate(templateId) : docId ? await connectServer(docId, openingMode, permissions, actions) : local
-  const handle = await createEditor(el, { ...host, seals: demoSeals(), request, dataSources: DATA_SOURCES, importDocx: pages ? undefined : importDocx,
-    previewSamples: [
-      { id: 'order-1', label: '采购单 001', values: { partyA: '上海示例客户', partyAAddress: '上海市浦东新区', partyACredit: '913100000000000001', amount: '5200', payMethod: 'once', signDate: '2026-03-18', items: [{ name: '显示器', model: '27英寸', qty: '2', price: '2600' }] } },
-      { id: 'order-2', label: '采购单 002', values: { partyA: '杭州示例客户', partyAAddress: '杭州市西湖区', partyACredit: '913300000000000002', amount: '800', payMethod: 'stage', signDate: '2026-04-01', items: [{ name: '键盘', model: '标准版', qty: '4', price: '200' }] } },
-    ],
-  })
+  const handle = await createEditor(el, { ...host, seals: demoSeals(), request, dataSources: DATA_SOURCES, importDocx: pages ? undefined : importDocx, previewSamples: sample.preview })
   // 给端到端测试用
   ;(window as unknown as { __oe: unknown }).__oe = handle
 } catch (e) {

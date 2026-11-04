@@ -5,7 +5,8 @@
   "description": "编辑器组件和 SDK（Vue 3，界面按 04-界面规范）",
   "type": "module",
   "exports": {
-    ".": "./src/index.ts"
+    ".": "./src/index.ts",
+    "./embed": "./src/embed/client.ts"
   },
   "scripts": {
     "typecheck": "vue-tsc --noEmit -p .",
@@ -14,7 +15,11 @@
   },
   "dependencies": {
     "@hufe921/canvas-editor": "1.0.6",
+    "@hufe921/canvas-editor-plugin-docx": "1.0.0",
     "@oe/core": "workspace:*",
+    "@oe/docx": "workspace:*",
+    "jszip": "3.10.1",
+    "pdf-lib": "^1.17.1",
     "vue": "^3.5.44"
   },
   "devDependencies": {
