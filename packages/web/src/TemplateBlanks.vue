@@ -35,7 +35,8 @@ const blanks = computed(() => {
 function select(blank: { text: string; occurrence: number }) {
   const range = props.editor.command.getKeywordRangeList(blank.text)[blank.occurrence]
   if (!range) return
-  props.editor.command.executeReplaceRange(range)
+  // 搜到的 startIndex 是第一个字的下标，选区是 (startIndex, endIndex]：往前挪一个才把第一个字也选上（不然设为字段后留下一个「_」）
+  props.editor.command.executeReplaceRange({ ...range, startIndex: range.startIndex - 1 })
   emit('select')
 }
 </script>

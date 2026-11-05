@@ -738,6 +738,9 @@ test('接真实服务端全流程：宿主改值改条款后打开编辑器看�
         const req = route.request()
         const u = new URL(req.url())
         const h = req.headers()
+        // 多人编辑的事件流是长连接，inject 等不到它结束：这里回 204 不转（编辑器照常一个人用，过一会儿重连；多人编辑另有脚本验证）。
+        // 不用 abort：网络失败会在控制台报错，用例把控制台错误算作页面错误
+        if (u.pathname.endsWith('/events')) return route.fulfill({ status: 204 })
         const r = await server.app.inject({
           method: req.method() as 'GET',
           url: u.pathname + u.search,
@@ -795,11 +798,14 @@ test('接真实服务端全流程：宿主改值改条款后打开编辑器看�
     await typeInBody(fill.page, '双方无', '另行')
     await fill.page.click('.oe .oe-primary')
     await expect(fill.page.locator('.oe .doc-status')).toHaveText('已提交')
-    const patch = calls.slice(from).find((c) => c.method === 'PATCH')!
-    expect(patch.status).toBe(200)
-    expect(Object.keys(patch.req!.patch as object)).not.toContain('contractNo')
-    expect(Object.keys(patch.req!.patch as object)).not.toContain('partyAAddress')
-    const sentAreas = patch.req!.areas as Record<string, { value: string }[]>
+    // 多人编辑（docs/设计/08）后填写时会自动保存：一次提交可能分成几个 PATCH，按全部合起来看
+    const patches = calls.slice(from).filter((c) => c.method === 'PATCH')
+    expect(patches.length).toBeGreaterThan(0)
+    expect(patches.map((p) => p.status)).toEqual(patches.map(() => 200))
+    const sentKeys = patches.flatMap((p) => Object.keys(p.req!.patch as object))
+    expect(sentKeys).not.toContain('contractNo')
+    expect(sentKeys).not.toContain('partyAAddress')
+    const sentAreas = Object.assign({}, ...patches.map((p) => p.req!.areas as Record<string, { value: string }[]>)) as Record<string, { value: string }[]>
     expect(Object.keys(sentAreas)).toEqual(['supplement'])
     expect(sentAreas.supplement!.map((r) => r.value).join('')).toBe('双方无另行其他约定。')
     s = await stored()

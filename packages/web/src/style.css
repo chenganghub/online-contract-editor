@@ -134,6 +134,372 @@
   gap: 8px;
 }
 
+/* 多人编辑：在看的人。灰底头像叠在一起，外圈一道底色把相邻的分开（不加别的颜色） */
+.oe .presence {
+  display: flex;
+  align-items: center;
+  margin-right: 4px;
+}
+/* 和控件同高（28）：中文名两个字放得下，叠 4 像素不压到字 */
+.oe .avatar {
+  display: inline-grid;
+  place-items: center;
+  width: var(--oe-control-h);
+  height: var(--oe-control-h);
+  overflow: hidden;
+  border-radius: 50%;
+  font-size: 10px;
+  font-weight: 600;
+  color: var(--oe-label-2);
+  white-space: nowrap;
+  background: linear-gradient(var(--oe-fill-2), var(--oe-fill-2)), var(--oe-bg);
+  box-shadow: 0 0 0 2px var(--oe-bg);
+  cursor: default;
+}
+.oe .avatar + .avatar {
+  margin-left: -4px;
+}
+.oe .avatar.more {
+  font-weight: 400;
+}
+.oe .collab-offline {
+  font-size: 11px;
+  color: var(--oe-label-2);
+  white-space: nowrap;
+}
+/* 工具栏上的批注、修订、版本按钮：开着面板时按下的样子；数字是没解决的批注、没处理的修订（主色小圆，数字白色） */
+.oe .oe-comments,
+.oe .oe-trace {
+  position: relative;
+}
+.oe .oe-comments[aria-pressed='true'],
+.oe .oe-trace[aria-pressed='true'],
+.oe .oe-versions[aria-pressed='true'] {
+  background: var(--oe-fill-2);
+  color: var(--oe-label);
+}
+/* 记录修订开着：图标用主色 */
+.oe .oe-trace.on {
+  color: var(--oe-accent);
+}
+.oe .oe-comments .badge,
+.oe .oe-trace .badge {
+  position: absolute;
+  top: 0;
+  right: -3px;
+  min-width: 14px;
+  height: 14px;
+  padding: 0 3px;
+  border-radius: 7px;
+  background: var(--oe-accent);
+  color: #ffffff;
+  font-size: 10px;
+  font-weight: 600;
+  line-height: 14px;
+  text-align: center;
+  font-variant-numeric: tabular-nums;
+}
+.oe .button-tinted.small {
+  height: 24px;
+  padding: 0 10px;
+  font-size: 12px;
+}
+
+/* 批注、修订、版本面板（08 第 3 节）：放在检查器的位置；只读模式本来没有检查器，开面板时让出右边一栏 */
+.oe[data-mode] .workspace.panel-open {
+  grid-template-columns: minmax(0, 1fr) var(--oe-sidebar-w);
+}
+.oe[data-mode] .workspace.template-design.panel-open {
+  grid-template-columns: var(--oe-sidebar-w) minmax(0, 1fr) var(--oe-sidebar-w);
+}
+.oe .comment-new {
+  display: grid;
+  gap: 8px;
+  margin-bottom: 16px;
+}
+.oe .comments textarea {
+  width: 100%;
+  padding: 6px 8px;
+  border: 0;
+  border-radius: 8px;
+  background: var(--oe-fill-1);
+  font: inherit;
+  color: inherit;
+  resize: vertical;
+  outline: none;
+}
+.oe .comments textarea:focus {
+  box-shadow: 0 0 0 3px var(--oe-accent-tint);
+}
+.oe .comment-quote {
+  display: -webkit-box;
+  margin: 0 0 6px;
+  padding-left: 8px;
+  overflow: hidden;
+  border-left: 2px solid var(--oe-separator);
+  font-size: 12px;
+  color: var(--oe-label-2);
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+}
+.oe .comment-list {
+  margin: 0 -8px;
+  padding: 0;
+  list-style: none;
+}
+.oe .comment-thread {
+  padding: 8px;
+  border-radius: 8px;
+  transition: background-color var(--oe-fast) ease;
+}
+.oe .comment-thread + .comment-thread {
+  margin-top: 4px;
+}
+.oe .comment-thread:hover {
+  background: var(--oe-fill-1);
+}
+.oe .comment-thread.active {
+  background: var(--oe-accent-tint);
+}
+.oe .comment-item + .comment-item {
+  margin-top: 8px;
+  padding-top: 8px;
+  border-top: 0.5px solid var(--oe-separator);
+}
+.oe .comment-meta {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  min-height: 24px;
+  font-size: 11px;
+  color: var(--oe-label-2);
+}
+.oe .comment-meta .remove {
+  opacity: 0;
+  transition: opacity var(--oe-fast) ease;
+}
+.oe .comment-item:hover .remove,
+.oe .comment-meta .remove:focus-visible {
+  opacity: 1;
+}
+.oe .comment-body {
+  margin: 2px 0 0;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+.oe .comment-list.resolved .comment-body {
+  color: var(--oe-label-2);
+}
+.oe .comment-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+  margin-top: 8px;
+}
+.oe .comment-reply {
+  margin-top: 8px;
+}
+.oe .comment-resolved {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  margin-top: 16px;
+  padding: 0;
+  border: 0;
+  background: none;
+  font: inherit;
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--oe-label-2);
+}
+.oe .comment-error {
+  margin: 0 0 8px;
+  font-size: 12px;
+  color: var(--oe-accent);
+}
+/* 条件条款弹层：字段下拉、选项（勾上的任一项时出这段）、按钮。勾选框用系统的，不用输入框的样子 */
+.oe .condition-options {
+  max-height: 200px;
+  overflow: auto;
+}
+.oe .condition-options .row {
+  cursor: pointer;
+}
+.oe .condition-options .row span {
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.oe .field-form .condition-options input[type='checkbox'] {
+  flex: none;
+  width: 16px;
+  height: 16px;
+  margin: 0;
+  padding: 0;
+  background: none;
+  accent-color: var(--oe-accent);
+  box-shadow: none;
+}
+.oe .field-form-actions {
+  gap: 8px;
+}
+/* 新建字段时公式写错的原因（主色，和保存状态出问题时一样） */
+.oe .field-form-error {
+  margin: 0;
+  font-size: 12px;
+  color: var(--oe-accent);
+}
+
+/* 开关（HIG 的 switch）：灰底，开着时主色，白色圆钮 */
+.oe .switch-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  height: var(--oe-row-h);
+  margin-bottom: 8px;
+}
+.oe .switch {
+  position: relative;
+  flex: none;
+  width: 36px;
+  height: 20px;
+  margin: 0;
+  border-radius: 10px;
+  background: var(--oe-fill-2);
+  appearance: none;
+  cursor: pointer;
+  transition: background-color var(--oe-fast) ease;
+}
+.oe .switch::after {
+  content: '';
+  position: absolute;
+  top: 2px;
+  left: 2px;
+  width: 16px;
+  height: 16px;
+  border-radius: 50%;
+  background: #ffffff;
+  box-shadow: var(--oe-shadow-thumb);
+  transition: transform var(--oe-normal) var(--oe-spring);
+}
+.oe .switch:checked {
+  background: var(--oe-accent);
+}
+.oe .switch:checked::after {
+  transform: translateX(16px);
+}
+.oe .switch:disabled {
+  opacity: 0.4;
+  cursor: default;
+}
+.oe .switch:focus-visible {
+  outline: 3px solid var(--oe-accent-tint);
+}
+
+/* 修订面板：一处一条，文字按正文里的样子标（插入下划线、删除删除线，颜色和 canvas-editor 画的一样，是内容的颜色） */
+.oe .trace-all {
+  justify-content: flex-start;
+  margin: 0 0 12px;
+}
+.oe .trace-item {
+  cursor: pointer;
+}
+.oe .trace-type {
+  font-weight: 600;
+  color: var(--oe-label);
+}
+.oe .trace-text {
+  display: -webkit-box;
+  margin: 2px 0 0;
+  overflow: hidden;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  -webkit-line-clamp: 3;
+  -webkit-box-orient: vertical;
+}
+.oe .trace-item[data-type='inserted'] .trace-text,
+.oe .mark-inserted {
+  text-decoration: underline 1.5px #2b5ce6;
+  text-underline-offset: 3px;
+}
+.oe .trace-item[data-type='deleted'] .trace-text,
+.oe .mark-deleted {
+  text-decoration: line-through 1.5px #e03f3f;
+}
+.oe .trace-item[data-type='deleted'] .trace-text {
+  color: var(--oe-label-2);
+}
+
+/* 版本面板：一版一行，点了对比 */
+.oe .version-row {
+  width: 100%;
+  border: 0;
+  background: transparent;
+  font: inherit;
+  color: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+.oe .version-row .row-meta {
+  margin-left: 8px;
+}
+
+/* 版本对比：盖住整个编辑器，上面一条工具栏（任选两版、增删多少处、返回），下面是对比结果 */
+.oe .compare {
+  position: absolute;
+  inset: 0;
+  z-index: 30;
+  display: grid;
+  grid-template-rows: 52px auto minmax(0, 1fr);
+  background: var(--oe-canvas);
+}
+.oe .compare-toolbar {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 12px;
+  padding: 0 16px;
+  background: var(--oe-glass);
+  -webkit-backdrop-filter: var(--oe-glass-filter);
+  backdrop-filter: var(--oe-glass-filter);
+  border-bottom: 0.5px solid var(--oe-separator);
+}
+.oe .compare-title {
+  font-weight: 600;
+}
+.oe .compare-toolbar select {
+  max-width: 240px;
+  height: var(--oe-control-h);
+  padding: 0 8px;
+  border: 0;
+  border-radius: 8px;
+  background: var(--oe-fill-1);
+  font: inherit;
+  color: inherit;
+}
+.oe .compare-toolbar svg {
+  color: var(--oe-label-2);
+}
+.oe .compare-summary {
+  min-width: 120px;
+  font-size: 12px;
+  color: var(--oe-label-2);
+  font-variant-numeric: tabular-nums;
+}
+.oe .compare-summary .mark-inserted,
+.oe .compare-summary .mark-deleted {
+  color: var(--oe-label);
+}
+.oe .compare-error {
+  margin: 8px 16px 0;
+  font-size: 12px;
+  color: var(--oe-accent);
+}
+.oe .compare-canvas {
+  overflow: auto;
+  padding: 24px 0 32px;
+}
+
 /* 分段控件 */
 .oe .segmented {
   position: relative;
@@ -325,7 +691,8 @@
 @media (max-width: 1399px) {
   .oe .workspace.template-design { grid-template-columns: var(--oe-sidebar-w) minmax(0, 1fr); }
   .oe .template-design > .inspector { display: none; }
-  .oe .template-design.has-active-field > .inspector { display: block; position: fixed; right: 16px; top: 104px; bottom: calc(var(--oe-statusbar-h) + 16px); z-index: 10; border: 0; border-radius: 12px; box-shadow: var(--oe-shadow-pop); }
+  .oe .template-design.has-active-field > .inspector,
+  .oe .template-design.panel-open > .inspector { display: block; position: fixed; right: 16px; top: 104px; bottom: calc(var(--oe-statusbar-h) + 16px); z-index: 10; border: 0; border-radius: 12px; box-shadow: var(--oe-shadow-pop); }
 }
 .oe .canvas {
   position: relative;
@@ -364,8 +731,9 @@
     opacity var(--oe-fast) ease,
     transform var(--oe-normal) var(--oe-spring);
 }
-/* 其他模式只是藏起来、位置照留，切模式时页面不上下跳（和原型一致） */
-.oe:not([data-mode='edit']) .format-bar {
+/* 其他模式只是藏起来、位置照留，切模式时页面不上下跳（和原型一致）；多人编辑时编辑锁在别人手上（aria-hidden）也一样 */
+.oe:not([data-mode='edit']) .format-bar,
+.oe .format-bar[aria-hidden='true'] {
   opacity: 0;
   transform: translateY(-8px);
   pointer-events: none;

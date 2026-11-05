@@ -26,7 +26,7 @@ const props = defineProps<{
   /** 正文宽度（px）：插图片时按它限宽 */
   contentWidth: () => number
 }>()
-const emit = defineEmits<{ area: []; field: []; page: [page: PageSetup]; notice: [text: string] }>()
+const emit = defineEmits<{ area: []; condition: [anchor: DOMRect]; field: []; page: [page: PageSetup]; notice: [text: string] }>()
 
 const cmd = () => props.editor!.command
 /** 下拉框拿了焦点，选完把焦点还给编辑器，接着打字 */
@@ -292,6 +292,7 @@ function setPage(change: { paper?: string; horizontal?: boolean; margin?: [numbe
     <span class="group">
       <button v-if="fieldButton" type="button" class="button-tinted" :disabled="!canField" @click="emit('field')">设为字段</button>
       <button type="button" class="fmt" aria-label="可编辑区" title="可编辑区" :aria-pressed="state.area" :disabled="!state.canArea" @click="emit('area')"><OeIcon name="area" /></button>
+      <button type="button" class="fmt" aria-label="条件条款" title="条件条款：按字段的值出不出这段" :aria-pressed="state.condition" :disabled="!state.canCondition" @click="emit('condition', ($event.currentTarget as HTMLElement).getBoundingClientRect())"><OeIcon name="branch" /></button>
     </span>
   </div>
   </div>

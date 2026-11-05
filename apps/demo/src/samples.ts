@@ -1,6 +1,6 @@
 // 演示用的合同范本（docs/设计/07 第 5 节）：采购（sample.ts 里原有的）、销售、技术服务、房屋租赁、保密协议。
 // 条款是示例，不构成法律意见；字段、带出、循环表、可编辑区、计算字段的写法和宿主接入时一样。
-import type { DocData, FieldDef, PreviewSample } from '@oe/web'
+import { fieldElement, type DocData, type FieldDef, type PreviewSample } from '@oe/web'
 import { FIELDS, PAY_OPTIONS, sampleDoc } from './sample'
 
 export interface Sample {
@@ -12,7 +12,16 @@ export interface Sample {
   preview: PreviewSample[]
 }
 
-type Part = string | { f: string } | { area: string; text: string } | { loop: string } | { image: string } | { title: string } | { h: string }
+type Part =
+  | string
+  | { f: string }
+  | { area: string; text: string }
+  | { loop: string }
+  | { image: string }
+  | { title: string }
+  | { h: string }
+  | { sign: string; date: string; label: string }
+  | { when: { field: string; in: string[] }; text: string }
 type El = Record<string, unknown>
 
 /** 选项：显示文字 → code（getData 返回的是 code，宿主按 code 存） */
@@ -84,10 +93,18 @@ function build(fields: FieldDef[], parts: Part[], header: string): DocData {
     else if ('h' in p) para(p.h, { bold: true })
     else if ('f' in p) main.push(control(field(p.f)))
     else if ('area' in p) main.push({ type: 'area', value: '', area: { extension: { anchor: p.area, editable: true } }, valueList: [{ value: p.text }] })
+    // 条件条款：区域上写条件，没满足时隐藏（编辑器打开时按值算）
+    else if ('when' in p) main.push({ type: 'area', value: '', area: { extension: { when: p.when }, hide: true }, valueList: [{ value: p.text }] })
     else if ('loop' in p) main.push(loopTable(field(p.loop)))
     else if ('image' in p) {
       para('')
       main.push(imageField(field(p.image)))
+    } else if ('sign' in p) {
+      // 一行：「代表签名：」签名区「签署日期：」签署日期（签名区用 @oe/web 的 fieldElement，和编辑器插入的一样）
+      para(p.label)
+      main.push(fieldElement(field(p.sign), 554) as unknown as El)
+      main.push({ value: '　签署日期：' })
+      main.push(control(field(p.date)))
     }
   }
   return { header: [{ value: header, size: 12, color: '#8e8e93', rowFlex: 'right' }], main, footer: [] } as unknown as DocData
@@ -102,8 +119,9 @@ const SALES_FIELDS = labelled(
     customer('buyer', { buyer: 'name', buyerAddress: 'address', buyerCredit: 'creditCode' }),
     { key: 'buyerAddress', label: '买方地址', type: 'text' },
     { key: 'buyerCredit', label: '买方统一社会信用代码', type: 'text' },
-    { key: 'products', label: '产品明细', type: 'loop', loop: { columns: ['name', 'spec', 'qty', 'price'], labels: ['产品名称', '规格型号', '数量', '单价（元）'] } },
-    { key: 'total', label: '合同总价', type: 'amount' },
+    // 公式（t11）：每行金额 = 数量 × 单价，总价 = 金额合计，大写跟着总价
+    { key: 'products', label: '产品明细', type: 'loop', loop: { columns: ['name', 'spec', 'qty', 'price', 'amount'], labels: ['产品名称', '规格型号', '数量', '单价（元）', '金额（元）'], formulas: { amount: 'qty * price' } } },
+    { key: 'total', label: '合同总价', type: 'computed', computed: { fn: 'formula', expr: 'sum(products.amount)' } },
     { key: 'totalCN', label: '总价大写', type: 'computed', computed: { from: 'total', fn: 'amountCN' } },
     { key: 'deliveryDate', label: '交货日期', type: 'date', format: 'yyyy年MM月dd日' },
     { key: 'deliveryPlace', label: '交货地点', type: 'text' },
@@ -130,6 +148,8 @@ const salesDoc = () =>
     '卖方应于 [deliveryDate] 前将产品交付至 [deliveryPlace]，交货时提供装箱单和产品合格证。',
     { h: '第四条　付款' },
     '付款方式：[payMethod]。买方在收到货物并验收合格后十个工作日内付清货款。',
+    // 条件条款（t11）：付款方式选分期付款才出这段
+    { when: { field: 'payMethod', in: ['stage'] }, text: '分期付款的，买方于本合同签订后七日内支付合同总价的 30% 作为预付款，验收合格后支付 60%，质保期满后支付剩余 10%。' },
     { h: '第五条　质量保证' },
     '产品质保期为 [warranty]，自验收合格之日起计算。质保期内非人为损坏的，卖方免费维修或更换。',
     { h: '第六条　违约责任' },
@@ -252,10 +272,18 @@ const NDA_FIELDS = labelled(
     customer('partyA', { partyA: 'name', partyAAddress: 'address' }),
     { key: 'partyAAddress', label: '甲方地址', type: 'text' },
     { key: 'partyB', label: '乙方', type: 'text' },
+    // 校验规则（t11）：格式不对的填写时标出、提交不了，服务端也拒
+    { key: 'partyBCredit', label: '乙方统一社会信用代码', type: 'text', rules: { pattern: 'creditCode' } },
+    { key: 'contactPhone', label: '乙方联系电话', type: 'text', rules: { pattern: 'mobile' } },
     { key: 'term', label: '保密期限', type: 'select', options: opts({ 二年: 'y2', 三年: 'y3', 五年: 'y5' }) },
-    { key: 'penalty', label: '违约金', type: 'amount' },
+    { key: 'penalty', label: '违约金', type: 'amount', rules: { min: 0, max: 10000000 } },
     { key: 'penaltyCN', label: '违约金大写', type: 'computed', computed: { from: 'penalty', fn: 'amountCN' } },
     { key: 'signDate', label: '签订日期', type: 'date', format: 'yyyy年MM月dd日' },
+    // 签名区、签署日期：签署时写（t12），填写时只读
+    { key: 'signA', label: '甲方代表签名', type: 'signature', signer: 'a' },
+    { key: 'signDateA', label: '甲方签署日期', type: 'signDate', signer: 'a', format: 'yyyy年MM月dd日' },
+    { key: 'signB', label: '乙方代表签名', type: 'signature', signer: 'b' },
+    { key: 'signDateB', label: '乙方签署日期', type: 'signDate', signer: 'b', format: 'yyyy年MM月dd日' },
   ],
   { partyA: '甲方' },
 )
@@ -265,6 +293,8 @@ const ndaDoc = () =>
     '甲方：[partyA]',
     '地址：[partyAAddress]',
     '乙方：[partyB]',
+    '统一社会信用代码：[partyBCredit]',
+    '联系电话：[contactPhone]',
     '鉴于双方正在进行业务合作，为保护双方的商业秘密，经协商一致，订立本协议。',
     { h: '第一条　保密信息' },
     { area: 'scope', text: '本协议所称保密信息，是指一方向另一方披露的、未公开的技术信息和经营信息，包括但不限于设计图纸、报价、客户名单和合同条款。' },
@@ -279,8 +309,10 @@ const ndaDoc = () =>
     '（以下无正文）',
     '',
     '甲方（盖章）：[partyA]',
+    { sign: 'signA', date: 'signDateA', label: '代表签名：' },
     '',
     '乙方（盖章）：[partyB]',
+    { sign: 'signB', date: 'signDateB', label: '代表签名：' },
     '',
     '签订日期：[signDate]',
   ], '保密协议')
@@ -303,7 +335,7 @@ export const SAMPLES: Sample[] = [
     fields: SALES_FIELDS,
     doc: salesDoc,
     preview: [
-      { id: 'so-001', label: '销售订单 SO-001', values: { contractNo: 'XS-2026-001', buyer: '南京长江智能制造有限公司', buyerAddress: '江苏省南京市江宁区天元东路 22 号', buyerCredit: '91320115MA1P2Q3R4S', products: [{ name: '立式加工中心', spec: 'VMC-850', qty: '2', price: '326000' }, { name: '刀库', spec: '24 刀位', qty: '2', price: '18000' }], total: '688000', deliveryDate: '2026年12月20日', deliveryPlace: '买方南京江宁工厂', payMethod: 'stage', warranty: 'm24', signDate: '2026年11月05日' } },
+      { id: 'so-001', label: '销售订单 SO-001', values: { contractNo: 'XS-2026-001', buyer: '南京长江智能制造有限公司', buyerAddress: '江苏省南京市江宁区天元东路 22 号', buyerCredit: '91320115MA1P2Q3R4S', products: [{ name: '立式加工中心', spec: 'VMC-850', qty: '2', price: '326000' }, { name: '刀库', spec: '24 刀位', qty: '2', price: '18000' }], deliveryDate: '2026年12月20日', deliveryPlace: '买方南京江宁工厂', payMethod: 'stage', warranty: 'm24', signDate: '2026年11月05日' } },
     ],
   },
   {

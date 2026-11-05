@@ -9,6 +9,8 @@ export interface DocData {
   footer?: IElement[]
   /** 纸张和页码（s3 加的；docx 导入时按第一节设置）。不填用 A4 竖放、默认页边距和页码 */
   page?: PageSetup
+  /** 修订开着（t10 加的）：谁在编辑模式里改正文都记下插入、删除，直到有人关掉。修订本身在元素的 trace 上（见 trace.ts） */
+  trackChanges?: boolean
 }
 
 /** 纸张设置，单位是编辑器像素（96 dpi）。横放时编辑器自己交换宽高、把页边距转 90°，所以这里都按竖放写 */
@@ -35,6 +37,10 @@ export type FieldType =
   | 'computed'
   | 'image'
   | 'loop'
+  /** 签名区（t11 加的）：签署时手写的签名图片，绑定签署方（signer）；没签时是占位图 */
+  | 'signature'
+  /** 签署日期（t11 加的）：签署时由服务端按服务器时间写，绑定签署方 */
+  | 'signDate'
 export type Permission = 'editable' | 'readonly' | 'required' | 'hidden'
 export type Mode = 'edit' | 'fill' | 'seal' | 'view'
 export type DocStatus = 'filling' | 'sealing' | 'sealed' | 'void'
@@ -63,10 +69,32 @@ export interface FieldDef {
   fill?: Record<string, string>
   /** 日期、金额的显示格式 */
   format?: string
-  /** 计算字段 */
-  computed?: { from: string; fn: 'amountCN' }
-  /** 表格循环：每行记录里的属性名（循环行里控件的 conceptId），labels 是表头文字（s6 加的，不填用属性名） */
-  loop?: { columns: string[]; labels?: string[] }
+  /**
+   * 计算字段：金额大写（from 那个字段转大写），或者公式（t11 加的，见 formula.ts）：字段之间四则运算、
+   * 循环表某一列的合计 sum(循环字段.列)；digits 是保留几位小数，不填 2（末尾的 0 去掉）
+   */
+  computed?: { fn: 'amountCN'; from: string } | { fn: 'formula'; expr: string; digits?: number }
+  /**
+   * 表格循环：每行记录里的属性名（循环行里控件的 conceptId），labels 是表头文字（s6 加的，不填用属性名）；
+   * formulas 是行内计算的列（t11 加的）：列名 → 同一行别的列的公式，如 { amount: 'qty * price' }
+   */
+  loop?: { columns: string[]; labels?: string[]; formulas?: Record<string, string> }
+  /** 签名区、签署日期绑定的签署方（角色 key，见 fields.ts 的 SIGNER_ROLES）；签署时按它找签署人 */
+  signer?: string
+  /** 校验规则（t11 加的，见 rules.ts）：值是空的不查（必填另算）；填写保存、提交时编辑器和服务端都按它查 */
+  rules?: FieldRules
+}
+
+/** 字段的校验规则 */
+export interface FieldRules {
+  /** 字数（按字符数，emoji 算一个） */
+  minLength?: number
+  maxLength?: number
+  /** 常用格式：中国大陆手机号、18 位身份证号（含校验位）、统一社会信用代码（含校验位）、邮箱 */
+  pattern?: 'mobile' | 'idCard' | 'creditCode' | 'email'
+  /** 数值范围（值要是数字） */
+  min?: number
+  max?: number
 }
 
 export type FieldValue = string | number | boolean | string[] | null | Record<string, unknown>[]
@@ -91,6 +119,15 @@ export type Target =
   | { anchor: string }
   | { text: string; occurrence?: number }
   | { table: { id: string; row: number; col: number } }
+
+/**
+ * 条件条款（t11 加的）：区域的 area.extension.when。字段的值是 in 里的某一个时才出这段（复选的值有一个在里面就算），
+ * 否则隐藏（area.hide），编辑器、PDF、Word、HTML、纯文本都不出。见 conditions.ts
+ */
+export interface Condition {
+  field: string
+  in: string[]
+}
 
 /** 可编辑区里一段文字能带的样式（取值范围见 fill.ts 的 areaStyle）。字号、段前段后是 px，行距 rowMargin 是倍数 */
 export interface AreaStyle {
@@ -160,8 +197,8 @@ export type FillResult =
   | { ok: true; data: DocData; values: DocValues }
   | {
       ok: false
-      // BAD_ARGUMENT 是 s2 加的：值的类型不对（例如文本字段传了对象）
-      code: 'PERMISSION_DENIED' | 'FIELD_NOT_FOUND' | 'VALUE_NOT_IN_OPTIONS' | 'BAD_ARGUMENT'
+      // BAD_ARGUMENT 是 s2 加的：值的类型不对（例如文本字段传了对象）；INVALID_VALUE 是 t11 加的：不合字段的校验规则
+      code: 'PERMISSION_DENIED' | 'FIELD_NOT_FOUND' | 'VALUE_NOT_IN_OPTIONS' | 'BAD_ARGUMENT' | 'INVALID_VALUE'
       field: string
       error: string
     }

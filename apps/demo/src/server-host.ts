@@ -1,11 +1,16 @@
 // 演示宿主接真实服务端（s13）：地址带 ?doc=<文档 id> 时用，模式和权限的模拟参数和本地版一样（main.ts）。
 // 先带宿主登录态向宿主后端要文档令牌（host-backend.ts），之后只用文档令牌，放在请求头 X-Document-Token；
 // 文档令牌和宿主登录态都不进任何地址（方案 4.7，验收 16）。接口和页面同源（真实部署由宿主反向代理 /api）
-import type { DocActions, EditorOptions, LoadedDocument, Mode, Permission } from '@oe/web'
+import { sseCollab, type DocActions, type EditorOptions, type FieldDef, type LoadedDocument, type Mode, type Permission, type SaveResult } from '@oe/web'
 import { HOST_TOKEN } from './customers'
 
 type ServerDoc = LoadedDocument & { mode: Mode; version: number; status: string }
-export type HostFunctions = Pick<EditorOptions, 'mode' | 'modes' | 'load' | 'save' | 'publish' | 'onSeal' | 'download'>
+export type HostFunctions = Pick<EditorOptions, 'mode' | 'modes' | 'load' | 'save' | 'publish' | 'onSeal' | 'download' | 'collab'>
+/** 演示用的当前用户（真实宿主用自己的登录态，这里用地址上的 ?user= 模拟几个人） */
+export interface DemoUser {
+  id: string
+  name: string
+}
 
 /** 失败时抛出服务端给的原因（错误响应是 { code, message }） */
 async function fail(res: Response, what: string): Promise<never> {
@@ -18,48 +23,63 @@ async function parse<T>(res: Response, what: string): Promise<T> {
 }
 
 /** 要令牌、按令牌取文档（模式、权限、能不能打印下载以服务端为准，隐藏字段的值服务端已经剔除），返回接到服务端的宿主函数 */
-export async function connectServer(docId: string, mode: Mode, permissions: Record<string, Permission>, actions: DocActions): Promise<HostFunctions> {
+export async function connectServer(docId: string, mode: Mode, permissions: Record<string, Permission>, actions: DocActions, user?: DemoUser): Promise<HostFunctions> {
   const { token } = await parse<{ token: string }>(
     await fetch('/host/token', {
       method: 'POST',
       headers: { Authorization: HOST_TOKEN, 'Content-Type': 'application/json' },
-      body: JSON.stringify({ documentId: docId, mode, permissions, actions }),
+      body: JSON.stringify({ documentId: docId, mode, permissions, actions, user }),
     }),
     '拿文档令牌',
   )
   const base = `/api/documents/${encodeURIComponent(docId)}`
   const initial = await parse<ServerDoc>(await fetch(base, { headers: { 'X-Document-Token': token } }), '打开文档')
   let version = initial.version
-  // 一个接一个发：服务端每次改动版本号加 1，后一个要带前一个返回的版本号（放章还在途时点「完成」，提交也排在后面）
+  // 一个接一个发：服务端每次改动版本号加 1，后一个要带前一个返回的版本号（放章还在途时点「完成」，提交也排在后面）。
+  // at：多人编辑时编辑器给的版本号（它手上的文档是哪一版），优先用它。别人先改了同一字段时服务端回 409 FIELD_CONFLICT，交还给编辑器处理
   let last: Promise<unknown> = Promise.resolve()
-  const send = (method: string, path: string, body: Record<string, unknown>) => {
+  const send = (method: string, path: string, body: Record<string, unknown>, at?: number): Promise<SaveResult> => {
     const run = last
       .catch(() => {})
       .then(async () => {
-        const res = await fetch(base + path, { method, headers: { 'X-Document-Token': token, 'Content-Type': 'application/json' }, body: JSON.stringify({ ...body, version }) })
+        const res = await fetch(base + path, { method, headers: { 'X-Document-Token': token, 'Content-Type': 'application/json' }, body: JSON.stringify({ ...body, version: at ?? version }) })
+        if (res.status === 409 && body.base) {
+          const err = (await res.clone().json().catch(() => ({}))) as { code?: string; conflicts?: SaveResult['conflicts']; version?: number }
+          if (err.code === 'FIELD_CONFLICT') return { conflicts: err.conflicts, version: err.version }
+          if (err.code === 'VERSION_CONFLICT') return { stale: true }
+        }
         const r = await parse<{ version?: number }>(res, '保存')
-        if (typeof r.version === 'number') version = r.version
+        if (typeof r.version === 'number') version = Math.max(version, r.version)
+        return { version: r.version }
       })
     last = run
     return run
   }
-  // 填写模式只提交可编辑（含必填）字段的值，服务端按令牌的权限写进文档，和 core 的 applyFill 同一个判定（方案 4.7）
-  const permOf = (key: string, own?: Permission) => initial.permissions?.[key] ?? own ?? 'editable'
-  const editable = new Set(initial.fields.filter((f) => f.type !== 'computed' && ['editable', 'required'].includes(permOf(f.key, f.permission))).map((f) => f.key))
+  // 填写模式只提交可编辑（含必填）字段的值，服务端按令牌的权限写进文档，和 core 的 applyFill 同一个判定（方案 4.7）；
+  // 令牌、模板都没给权限时，签名区、签署日期只读（签署时由服务端写，同 core 的 permissionOf），其他可编辑
+  const permOf = (f: FieldDef): Permission => initial.permissions?.[f.key] ?? f.permission ?? (f.type === 'signature' || f.type === 'signDate' ? 'readonly' : 'editable')
+  const editable = new Set(initial.fields.filter((f) => f.type !== 'computed' && ['editable', 'required'].includes(permOf(f))).map((f) => f.key))
   return {
     mode: initial.mode,
     modes: [initial.mode],
     load: async () => initial,
-    save: async ({ mode, doc, values, pageCount, areas }) => {
-      if (mode === 'edit') return send('PUT', '', { doc, values, pageCount })
+    // 多人编辑时编辑器给 changed、base、conn、version：只交改过的字段，服务端按字段合并、判冲突（docs/接入指南.md）
+    save: async ({ mode, doc, values, pageCount, areas, changed, base: seen, conn, version: at }) => {
+      const collab = seen ? { base: seen, conn } : {}
+      if (mode === 'edit') return send('PUT', '', { doc, values, pageCount, ...collab }, at)
       if (mode === 'fill') {
-        const patch = Object.fromEntries(Object.entries(values.values).filter(([k]) => editable.has(k)))
+        const keys = changed ?? Object.keys(values.values)
+        const patch = Object.fromEntries(keys.filter((k) => editable.has(k)).map((k) => [k, values.values[k] ?? null]))
         // 改过的可编辑区一起提交，服务端只接受模板里标成可编辑区的
-        return send('PATCH', '/data', { patch, areas, pageCount })
+        return send('PATCH', '/data', { patch, areas, pageCount, ...collab }, at)
       }
       if (mode === 'seal') return send('POST', '/seal-status', { action: 'submit' })
     },
-    onSeal: (op) => send('POST', '/seals', op),
+    onSeal: async (op) => {
+      await send('POST', '/seals', op)
+    },
+    // 多人编辑：事件流和在场都只带文档令牌（请求头），见 docs/接入指南.md
+    collab: sseCollab({ events: `${base}/events`, presence: `${base}/presence`, lock: `${base}/lock`, document: base, comments: `${base}/comments`, revisions: `${base}/revisions`, headers: { 'X-Document-Token': token } }),
     download: async (format) => {
       const res = await fetch(`${base}/export?format=${format}`, { headers: { 'X-Document-Token': token } })
       if (!res.ok) return fail(res, '下载')

@@ -1,12 +1,12 @@
 // 按权限处理文档：下发前剔除隐藏值；填写模式保存时只接受可编辑字段和可编辑区。
 import { OpError } from './errors'
-import { setFieldValues } from './fields'
+import { permissionOf as permOf, setFieldValues } from './fields'
 import { clone, controlLocs, elAt, walkDoc, type Doc, type El } from './model'
 import { canonicalize, isText } from './text'
+import { isDeleted } from './trace'
+import { applyConditions, conditionOf } from './conditions'
+import { ruleErrors } from './rules'
 import type { AreaRun, AreaStyle, DocData, DocValues, FieldDef, FieldValue, FillResult, Permission } from './types'
-
-const permOf = (f: FieldDef | undefined, key: string, perms: Record<string, Permission>): Permission =>
-  perms[key] ?? f?.permission ?? 'editable'
 
 /** 隐藏字段：文档里的控件保留、值清空，数据 JSON 里的值和快照删掉；隐藏的区域内容清空 */
 export function stripHidden(
@@ -30,9 +30,10 @@ export function stripHidden(
     delete out.values[key]
     if (out.snapshots) delete out.snapshots[key]
   }
+  // 隐藏的区域不下发内容；条件条款不是机密，只是现在不出，内容要留着（值变了编辑器里马上显示）
   for (const l of walkDoc(doc)) {
     const el = elAt(l)
-    if (el.type === 'area' && el.area?.hide) el.valueList = []
+    if (el.type === 'area' && el.area?.hide && !conditionOf(el)) el.valueList = []
   }
   return { data: doc as unknown as DocData, values: out }
 }
@@ -75,6 +76,20 @@ export function areaStyle(from: Record<string, unknown>): AreaStyle {
   const out: Record<string, unknown> = {}
   for (const [k, ok] of Object.entries(AREA_STYLE)) if (ok(from[k])) out[k] = from[k]
   return out as AreaStyle
+}
+
+/**
+ * 区域里的文字整理成提交的样子：上下标类型和样式（按 areaStyle 取）；零宽字符去掉，空的不要；修订删掉的字不要（编辑器里看不到）。
+ * 编辑器提交、服务端推给别人都用它
+ */
+export function areaRuns(list: readonly Record<string, unknown>[] | undefined): AreaRun[] {
+  return (list ?? []).flatMap((v) => {
+    const value = String(v.value ?? '').replace(/\u200B/g, '')
+    if (!value || isDeleted(v)) return []
+    const run: AreaRun = { value, ...areaStyle(v) }
+    if (v.type === 'subscript' || v.type === 'superscript') run.type = v.type
+    return [run]
+  })
 }
 
 /**
@@ -171,12 +186,16 @@ export function applyFill(
     if (def.type === 'computed' || (perm !== 'editable' && perm !== 'required'))
       return { ok: false, code: 'PERMISSION_DENIED', field: key, error: `字段 ${key} 不允许填写（${def.type === 'computed' ? '计算字段' : perm}）` }
   }
+  // 校验规则（字数、格式、数值范围）：有一个不合规就整次拒绝
+  const bad = ruleErrors(fields, patch)[0]
+  if (bad) return { ok: false, code: 'INVALID_VALUE', field: bad.key, error: `字段「${defs.get(bad.key)!.label}」${bad.error}` }
   const doc = clone(data) as unknown as Doc
   try {
-    const written = setFieldValues(doc, patch, fields)
+    const written = setFieldValues(doc, patch, fields, values.values)
     const next: DocValues = clone(values)
     next.values = { ...next.values, ...written }
-    return { ok: true, data: doc as unknown as DocData, values: next }
+    // 条件条款按写完的值重算显示不显示
+    return { ok: true, data: applyConditions(doc as unknown as DocData, next.values), values: next }
   } catch (e) {
     if (!(e instanceof OpError)) throw e
     const code = e.code === 'VALUE_NOT_IN_OPTIONS' || e.code === 'FIELD_NOT_FOUND' ? e.code : 'BAD_ARGUMENT'

@@ -62,6 +62,38 @@ export interface SavePayload {
   pageCount?: number
   /** 改过的可编辑区（按 anchor，带样式的文字）：填写模式保存时和字段值一起提交（PATCH data 的 areas） */
   areas?: Record<string, AreaRun[]>
+  /**
+   * 多人编辑（接了 collab 时才有，docs/设计/08 第 3 节）：和服务端上次同步的值比改过的字段 key。
+   * 宿主按它只提交这些（PATCH 的 patch 只放这几个），别人同时改的别的字段就不会被旧值盖掉
+   */
+  changed?: string[]
+  /** 和 changed 一起：每个改过的字段（可编辑区是 area:anchor）编辑器看到的是服务端哪一版的值，原样交给服务端（PATCH、PUT 的 base） */
+  base?: Record<string, number>
+  /** 编辑器的事件流连接 id，原样交给服务端（PATCH、PUT 的 conn）：服务端推改动时不推回给自己 */
+  conn?: string
+  /** 编辑器手上的文档对应服务端哪一版，交给服务端（PATCH、PUT 的 version） */
+  version?: number
+}
+
+/** 别人先改了的字段（服务端 409 FIELD_CONFLICT 的 conflicts） */
+export interface FieldConflict {
+  /** 字段 key；可编辑区是 area:anchor */
+  key: string
+  /** 服务端现在的值（可编辑区是带样式的文字） */
+  value: FieldValue | AreaRun[]
+  /** 改的人（显示用的名字） */
+  by?: string
+  version?: number
+}
+
+/** 宿主 save 可以返回的结果，都可选；不返回也行（一个人用时） */
+export interface SaveResult {
+  /** 服务端保存后的版本号 */
+  version?: number
+  /** 别人先改了这些字段，这次什么都没保存：编辑器换成对方的值、提示，再保存别的 */
+  conflicts?: FieldConflict[]
+  /** 正文在编辑器手上的那一版之后被别人整份改过（服务端 409 VERSION_CONFLICT），这次没保存：填写模式先按最新的重新装再存 */
+  stale?: boolean
 }
 
 /** 能不能打印、下载：宿主按令牌给（服务端 GET 文档时返回），不给（undefined）都能 */
@@ -75,6 +107,8 @@ export interface DocActions {
 export interface LoadedDocument {
   doc: DocData
   values?: DocValues
+  /** 服务端的版本号（GET /api/documents/{id} 的 version）：多人编辑时编辑器从这一版起跟踪别人的改动 */
+  version?: number
   fields: FieldDef[]
   /** 模板设计可插入的宿主字段库；已使用的字段仍以 fields 快照为准。 */
   libraryFields?: FieldDef[]
@@ -83,13 +117,120 @@ export interface LoadedDocument {
   actions?: DocActions
 }
 
+/** 在场的一个人（多人编辑，docs/设计/08 第 3 节）：同一个人开两个窗口算两条 */
+export interface CollabViewer {
+  /** 事件流连接 id */
+  conn: string
+  userId: string
+  name: string
+  mode: Mode
+  /** 光标所在的字段 key；不在字段里（或在你看不到的字段里）是 null */
+  field: string | null
+}
+/** 正文编辑锁：谁拿着、到什么时候 */
+export interface CollabLock {
+  userId: string
+  name: string
+  conn?: string
+  expiresAt: string
+}
+/** 改动的人 */
+export interface CollabBy {
+  userId: string
+  name: string
+}
+/** 连上（或重连）时服务端补发的：since 那一版之后别人改过的字段、可编辑区，正文有没有整份改过 */
+export interface CollabChanges {
+  values: Record<string, FieldValue>
+  areas?: Record<string, AreaRun[]>
+  /** 每个字段（可编辑区是 area:anchor）最后改在哪一版 */
+  versions: Record<string, number>
+  body: boolean
+}
+/** 服务端经事件流推来的事件 */
+export type CollabEvent =
+  | { type: 'hello'; conn: string; userId: string; name: string; version: number; status: string; lock: CollabLock | null; changes?: CollabChanges }
+  | { type: 'presence'; viewers: CollabViewer[] }
+  /** 别人保存了字段值、可编辑区（只有你能看到的字段） */
+  | { type: 'fields'; version: number; values: Record<string, FieldValue>; areas?: Record<string, AreaRun[]>; by: CollabBy; conn?: string }
+  /** 别人整份保存了正文（编辑模式） */
+  | { type: 'doc'; version: number; by: CollabBy; conn?: string }
+  | { type: 'lock'; lock: CollabLock | null }
+  /** 别人请求编辑（只发给拿着编辑锁的那条连接） */
+  | { type: 'lock-request'; from: CollabBy & { conn: string } }
+  | { type: 'status'; status: string; version: number; by: CollabBy }
+  | { type: 'comments'; by: CollabBy; conn?: string }
+
+/**
+ * 宿主函数：接上文档的事件流（多人编辑）。不给就没有多人编辑的功能。
+ * 浏览器里用 @oe/web 的 sseCollab 就行（fetch 读服务端 GET /api/documents/{id}/events，令牌放请求头）
+ */
+export interface CollabConnector {
+  /**
+   * 连上事件流，断了自己重连；返回断开的函数。since：每次（重）连时取编辑器已经有的版本号，
+   * 交给服务端（地址上的 since 参数，不是机密），服务端在 hello 里补发这之后的改动
+   */
+  connect(handlers: { event: (e: CollabEvent) => void; state?: (s: 'connecting' | 'open' | 'closed') => void; since?: () => number | undefined }): () => void
+  /** 告诉别人自己在哪个字段（null：不在字段里） */
+  presence?(field: string | null): Promise<void>
+  /**
+   * 正文编辑锁（编辑模式）：拿锁或续约、放锁（to：直接交给这条连接）、请求拿着锁的人交出来。
+   * 不给就不用锁（一个人编辑；服务端在没人拿锁时也照旧收整份保存）
+   */
+  lock?(action: 'acquire' | 'release' | 'request', to?: string): Promise<{ ok: boolean; lock: CollabLock | null }>
+  /** 取服务端最新的文档（别人保存了正文后重新装）；不给就不能自动刷新 */
+  load?(): Promise<LoadedDocument & { version: number; status?: string }>
+  /** 批注（不进文档、不进导出）；不给就没有批注 */
+  comments?: CommentApi
+  /** 版本历史（版本对比用）；不给就没有版本按钮 */
+  revisions?: RevisionApi
+}
+
+/** 版本历史里的一版（服务端 GET /api/documents/{id}/revisions）。同一个人连着编辑只留最后一份 */
+export interface RevisionItem {
+  /** 文档的版本号（存这一版时的） */
+  version: number
+  /** create 建文档；edit 编辑；start、submit、reject、void：开始盖章、提交盖章、驳回、作废 */
+  reason: 'create' | 'edit' | 'start' | 'submit' | 'reject' | 'void'
+  operatorName: string | null
+  at: string
+}
+/** 版本历史接口：服务端 GET /api/documents/{id}/revisions、…/revisions/{version} */
+export interface RevisionApi {
+  list(): Promise<RevisionItem[]>
+  get(version: number): Promise<{ doc: DocData }>
+}
+
+/** 一条批注或回复（回复的 parentId 是最上面那条；引用只在最上面那条上） */
+export interface CommentItem {
+  id: string
+  parentId: string | null
+  /** 引用的原文和它是第几处（从 0 起）；不针对哪段文字的批注没有 */
+  quote: string | null
+  occurrence: number | null
+  body: string
+  authorId: string
+  authorName: string
+  resolved: boolean
+  createdAt: string
+  updatedAt: string
+}
+/** 批注接口：服务端 GET、POST /api/documents/{id}/comments，PATCH、DELETE …/comments/{cid} */
+export interface CommentApi {
+  list(): Promise<CommentItem[]>
+  add(c: { body: string; quote?: string; occurrence?: number; parentId?: string }): Promise<CommentItem>
+  update(id: string, patch: { resolved?: boolean; body?: string }): Promise<void>
+  remove(id: string): Promise<void>
+}
+
 export interface EditorOptions {
   /** 打开时的模式 */
   mode: Mode
   /** 分段控件里显示哪些模式；只有一个时不显示分段控件 */
   modes?: Mode[]
   load: () => Promise<LoadedDocument>
-  save: (payload: SavePayload) => Promise<void>
+  /** 保存；多人编辑时返回 SaveResult（版本号、冲突），一个人用时不用返回 */
+  save: (payload: SavePayload) => Promise<void | SaveResult>
   /** 模板设计：编辑器先保存当前内容，再发布已保存的草稿。 */
   publish?: () => Promise<void>
   previewSamples?: PreviewSample[]
@@ -108,6 +249,8 @@ export interface EditorOptions {
   importDocx?: (file: File) => Promise<ImportResult>
   /** 有没保存的修改时，关闭或刷新页面前浏览器提醒；不传算开。宿主自己管离开提醒时传 false，用 EditorHandle.isDirty() 判断 */
   confirmLeave?: boolean
+  /** 多人编辑：文档的事件流（在场、别人保存的字段和正文、编辑锁）；不传就是一个人用 */
+  collab?: CollabConnector
 }
 
 /** 导入 Word 的结果：服务端（渲染服务 /convert）转好的文档和导入报告 */
@@ -129,8 +272,8 @@ export interface EditorEvents {
   change: undefined
   /** 字段值变了：用户填的、选的，宿主 setData 的都算 */
   'field-change': { key: string; value: FieldValue; previous: FieldValue }
-  /** 保存（或提交、发布）成功 */
-  saved: { mode: Mode; published: boolean }
+  /** 保存（或提交、发布）成功；auto：多人编辑时的自动保存 */
+  saved: { mode: Mode; published: boolean; auto?: boolean }
   'mode-change': Mode
   /** 有没有没保存的修改变了 */
   'dirty-change': boolean

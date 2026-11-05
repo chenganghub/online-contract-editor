@@ -1,7 +1,7 @@
 // 一次渲染：装文档 → 页面图 → 文字位置 → （worker 里）拼 PDF；docx 在页面里导出。
 // 规则来自方案第 12 节：页数以页面图张数为准，和期望页数不一致时重建页面重试一次，仍不一致返回 409；
 // 单次限时、总限时，超时也重试一次。
-import { choicesAsText, hasChoices, htmlDocument, layoutOptions, textDocument, type DocData, type DocParts } from '@oe/core'
+import { choicesAsText, hasChoices, htmlDocument, layoutOptions, textDocument, withoutHiddenAreas, type DocData, type DocParts } from '@oe/core'
 import { exportInfo, fixExportedDocx, prepareForExport, type Doc } from '@oe/docx'
 import { HttpError } from './errors'
 import type { FontConfig } from './fonts'
@@ -148,8 +148,11 @@ export async function render(pool: PagePool, fonts: FontConfig, limits: RenderLi
   const docxDoc = input.outputs.includes('docx')
     ? (prepareForExport(input.doc as unknown as Doc, { defaultSize: editorOptions(input.doc, input.options).defaultSize }) as unknown as DocData)
     : undefined
-  // HTML、纯文本：复选、单选控件写成字（和前端 docParts 一样），没有这两种控件就用原文档，不用多装一次
-  const textDoc = (input.outputs.includes('html') || input.outputs.includes('txt')) && hasChoices(input.doc) ? choicesAsText(input.doc) : input.doc
+  // HTML、纯文本：复选、单选控件写成字（和前端 docParts 一样），没有这两种控件就用原文档，不用多装一次；
+  // 隐藏的区域（没满足条件的条件条款）去掉：getHTML、getText 不管区域隐没隐藏
+  const wantsText = input.outputs.includes('html') || input.outputs.includes('txt')
+  const visible = wantsText ? withoutHiddenAreas(input.doc) : input.doc
+  const textDoc = wantsText && hasChoices(visible) ? choicesAsText(visible) : visible
   const left = () => limits.totalTimeoutMs - (now() - start)
   let mismatch: number | null = null
   let lastError: unknown = null

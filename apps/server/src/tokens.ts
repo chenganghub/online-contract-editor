@@ -10,6 +10,8 @@ export interface TokenPayload {
   did: string
   mode: Mode
   uid: string
+  /** 显示用的名字（在场、批注、编辑锁里显示），不给就显示 uid */
+  un?: string
   /** 过期时间，毫秒时间戳 */
   exp: number
 }

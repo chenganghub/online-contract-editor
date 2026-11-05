@@ -36,6 +36,13 @@
       "when": 1793595718366,
       "tag": "0004_mighty_blob",
       "breakpoints": true
+    },
+    {
+      "idx": 5,
+      "version": "5",
+      "when": 1793837501360,
+      "tag": "0005_collab",
+      "breakpoints": true
     }
   ]
 }

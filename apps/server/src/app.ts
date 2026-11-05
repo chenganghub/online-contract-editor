@@ -8,7 +8,12 @@ import {
   applyAreas,
   applyBatch,
   applyFill,
+  areaAnchors,
+  areaRuns,
   stripHidden,
+  traceChanges,
+  checkFormulas,
+  applyConditions,
   type AreaRun,
   type DocData,
   type DocStatus,
@@ -27,6 +32,9 @@ import type { FileStore } from './storage'
 import { hashKey, signToken, verifyToken, type TokenPayload } from './tokens'
 import { registerTemplateDrafts } from './template-drafts'
 import { withDictionaries } from './dictionaries'
+import { Hub, sees, type Subscriber } from './realtime'
+import { registerComments } from './comments'
+import { recordRevision, registerRevisions } from './revisions'
 
 export { HttpError }
 
@@ -38,6 +46,8 @@ export interface AppDeps {
   renderer?: RendererClient
   /** 测试用插桩：鉴权之后、进事务之前调用（用来模拟「保存在途时权限被改」） */
   hooks?: { afterAuth?: (req: FastifyRequest) => Promise<void> }
+  /** 文档事件的分发（多人编辑，08 第 3 节）；不给就在本进程里分发 */
+  hub?: Hub
 }
 
 type Tx = Parameters<Parameters<Db['transaction']>[0]>[0]
@@ -49,22 +59,47 @@ type Caller = { kind: 'host'; clientId: string } | { kind: 'token'; token: Token
 const PERMISSION = z.enum(['editable', 'readonly', 'required', 'hidden'])
 const MODE = z.enum(['edit', 'fill', 'seal', 'view'])
 const DOC = z.object({ main: z.array(z.any()), header: z.array(z.any()).optional(), footer: z.array(z.any()).optional() }).passthrough()
+// 计算字段：金额大写，或者公式（core 的 formula.ts；写法、引用、循环引用由 formulaIssues 查）
+const COMPUTED = z.union([
+  z.object({ fn: z.literal('amountCN'), from: z.string().min(1) }).strict(),
+  z.object({ fn: z.literal('formula'), expr: z.string().min(1).max(500), digits: z.number().int().min(0).max(6).optional() }).strict(),
+])
+// formulas：循环表行内计算的列 → 同一行别的列的公式
+const LOOP = z.object({ columns: z.array(z.string().min(1)).min(1), labels: z.array(z.string()).optional(), formulas: z.record(z.string().min(1), z.string().min(1).max(500)).optional() })
+// 校验规则（core 的 rules.ts）：字数、常用格式、数值范围；不收自定义正则
+const RULES = z
+  .object({
+    minLength: z.number().int().min(0).max(100000).optional(),
+    maxLength: z.number().int().min(1).max(100000).optional(),
+    pattern: z.enum(['mobile', 'idCard', 'creditCode', 'email']).optional(),
+    min: z.number().finite().optional(),
+    max: z.number().finite().optional(),
+  })
+  .strict()
+  .refine((r) => (r.minLength ?? 0) <= (r.maxLength ?? Infinity) && (r.min ?? -Infinity) <= (r.max ?? Infinity), '下限不能大于上限')
 const FIELD = z
   .object({
     key: z.string().min(1).max(100),
     label: z.string().min(1).max(100),
-    type: z.enum(['text', 'number', 'amount', 'date', 'select', 'radio', 'checkbox', 'picker', 'computed', 'image', 'loop']),
+    type: z.enum(['text', 'number', 'amount', 'date', 'select', 'radio', 'checkbox', 'picker', 'computed', 'image', 'loop', 'signature', 'signDate']),
     permission: PERMISSION.optional(),
+    computed: COMPUTED.optional(),
+    loop: LOOP.optional(),
+    rules: RULES.optional(),
   })
   .passthrough()
+/** 一组字段里公式的问题（写法、引用的字段、循环引用），模板和字段库都查 */
+const formulaIssues = (fields: z.infer<typeof FIELD>[], ctx: z.RefinementCtx) => {
+  for (const issue of checkFormulas(fields as FieldDef[])) ctx.addIssue({ code: 'custom', path: [fields.findIndex((f) => f.key === issue.key)], message: `字段 ${issue.key}：${issue.error}` })
+}
 // 字段库是外部输入边界，检查所有会被填写器使用的配置。
 const LIBRARY_FIELD = FIELD.extend({
   options: z.array(z.object({ code: z.string().min(1), value: z.string() })).optional(),
   dataSource: z.object({ id: z.string().min(1), kind: z.enum(['static', 'dict', 'remote', 'host']) }).optional(),
   fill: z.record(z.string().min(1), z.string().min(1)).optional(),
   format: z.string().optional(),
-  computed: z.object({ from: z.string().min(1), fn: z.literal('amountCN') }).optional(),
-  loop: z.object({ columns: z.array(z.string().min(1)).min(1), labels: z.array(z.string()).optional() }).optional(),
+  // 签名区、签署日期绑定的签署方角色（core 的 SIGNER_ROLES：a、b、c、d）
+  signer: z.string().regex(/^[a-z][a-z0-9_-]{0,31}$/).optional(),
 }).strict()
 const LIBRARY_FIELDS = z.array(LIBRARY_FIELD).max(1000).superRefine((fields, ctx) => {
   const keys = new Set<string>()
@@ -73,13 +108,15 @@ const LIBRARY_FIELDS = z.array(LIBRARY_FIELD).max(1000).superRefine((fields, ctx
     keys.add(field.key)
   }
   for (const [i, field] of fields.entries()) {
-    for (const key of [...Object.keys(field.fill ?? {}), ...(field.computed ? [field.computed.from] : [])]) {
+    for (const key of Object.keys(field.fill ?? {})) {
       if (!keys.has(key)) ctx.addIssue({ code: 'custom', path: [i], message: `引用的字段 ${key} 未登记` })
     }
+    if (field.computed?.fn === 'amountCN' && !keys.has(field.computed.from)) ctx.addIssue({ code: 'custom', path: [i], message: `引用的字段 ${field.computed.from} 未登记` })
   }
+  formulaIssues(fields, ctx)
 })
 const TEMPLATE_FIELDS = {
-  fields: z.array(FIELD).optional(),
+  fields: z.array(FIELD).superRefine(formulaIssues).optional(),
   fieldKeys: z.array(z.string().min(1).max(100)).max(1000).optional(),
 }
 const exclusiveFields = (body: { fields?: unknown; fieldKeys?: unknown }) => !(body.fields && body.fieldKeys)
@@ -106,8 +143,11 @@ const newId = () => crypto.randomUUID()
 
 export async function buildApp(deps: AppDeps): Promise<FastifyInstance> {
   const { config, db } = deps
+  const hub = deps.hub ?? new Hub()
   // 文档里带印章图片（base64），放宽请求体上限
   const app = Fastify({ bodyLimit: 20 * 1024 * 1024, logger: false })
+  // 事件流是长连接：关服务前先关掉，不然一直等
+  app.addHook('preClose', async () => hub.closeAll())
 
   app.setErrorHandler((err, _req, reply) => {
     if (err instanceof HttpError) return reply.status(err.status).send({ code: err.code, message: err.message, ...err.detail })
@@ -169,12 +209,55 @@ export async function buildApp(deps: AppDeps): Promise<FastifyInstance> {
     return perms
   }
 
-  async function lockDocument(tx: Tx, id: string, version: number) {
+  /**
+   * 锁住文档行，校验状态（填写中）和版本号。merge（多人编辑，08 第 3 节；请求里带了 base 才合并）：基准版本落后也行，
+   * 只要正文在基准版本之后没被整份改过（bodyVersion ≤ 基准）；正文改过、版本号比现在的还新，都是 409
+   */
+  async function lockDocument(tx: Tx, id: string, version: number, merge = false) {
     const [row] = await tx.select().from(document).where(eq(document.id, id)).for('update')
     if (!row) throw new HttpError(404, 'NOT_FOUND', '文档不存在')
     if (row.status !== 'filling') throw new HttpError(422, 'INVALID_STATUS', `文档状态是 ${row.status}，不能修改`)
-    if (row.version !== version) throw new HttpError(409, 'VERSION_CONFLICT', `文档已被别人修改（当前版本 ${row.version}），请刷新`)
+    const mergeable = merge && version < row.version && row.bodyVersion <= version
+    if (row.version !== version && !mergeable) throw new HttpError(409, 'VERSION_CONFLICT', `文档已被别人修改（当前版本 ${row.version}），请刷新`)
     return row
+  }
+
+  /** 前后两份字段值里变了的 key（含跟着变的计算字段） */
+  const changedKeys = (before: DocValues['values'], after: DocValues['values']) =>
+    [...new Set([...Object.keys(before), ...Object.keys(after)])].filter((k) => JSON.stringify(before[k] ?? null) !== JSON.stringify(after[k] ?? null))
+  type FieldVersions = NonNullable<typeof document.$inferSelect.fieldVersions>
+  /** 记下这些字段（area: 开头的是可编辑区）在哪一版被谁、经哪条事件流连接改的 */
+  const bumpFields = (prev: FieldVersions | null, keys: string[], v: number, caller: Caller, conn?: string) => {
+    const out = { ...(prev ?? {}) }
+    for (const k of keys) out[k] = { v, by: operatorOf(caller), name: nameOf(caller), ...(conn ? { conn } : {}) }
+    return out
+  }
+  /**
+   * 多人编辑的冲突检查（08 第 3 节）：base 是客户端看到的每个字段的版本。字段在那之后被别人（别的连接）改过，就是冲突；
+   * 自己这条连接改的不算（客户端不一定知道自己上次保存后的版本号）。value 给现在的值，可编辑区给带样式的文字
+   */
+  function conflictsOf(row: typeof document.$inferSelect, keys: string[], base: Record<string, number>, conn: string | undefined) {
+    return keys.flatMap((k) => {
+      const f = row.fieldVersions?.[k]
+      if (!f || f.v <= (base[k] ?? 0) || (conn && f.conn === conn)) return []
+      const value = k.startsWith('area:') ? areaRuns(areaAnchors(row.doc).find((a) => a.anchor === k.slice(5))?.el.valueList) : (row.values.values[k] ?? null)
+      return [{ key: k, value, by: f.name ?? f.by, version: f.v }]
+    })
+  }
+  /** 推字段值给其他连接：每个连接只拿到它看得到的字段；except 是发起保存的那条连接 */
+  const publishFields = (id: string, version: number, changed: Record<string, FieldValue>, areas: Record<string, unknown> | undefined, caller: Caller, except?: string) => {
+    if (!Object.keys(changed).length && !Object.keys(areas ?? {}).length) return
+    const by = { userId: operatorOf(caller), name: nameOf(caller) }
+    hub.publish(
+      id,
+      'fields',
+      (s) => {
+        const values = Object.fromEntries(Object.entries(changed).filter(([k]) => sees(s, k)))
+        if (!Object.keys(values).length && !Object.keys(areas ?? {}).length) return null
+        return { version, values, ...(areas && Object.keys(areas).length ? { areas } : {}), by }
+      },
+      except,
+    )
   }
 
   /**
@@ -184,6 +267,9 @@ export async function buildApp(deps: AppDeps): Promise<FastifyInstance> {
    */
   const seesStripped = (caller: Caller, fields: FieldDef[]) =>
     caller.kind === 'token' && fields.some((f) => (caller.perms[f.key] ?? f.permission ?? 'editable') === 'hidden')
+
+  /** 显示用的名字：令牌签发时给的，没给用 userId；宿主是「宿主」 */
+  const nameOf = (c: Caller) => (c.kind === 'host' ? '宿主' : (c.token.un ?? c.token.uid))
 
   // ---------- 接口 ----------
   app.get('/api/health', async () => ({ ok: true }))
@@ -222,6 +308,23 @@ export async function buildApp(deps: AppDeps): Promise<FastifyInstance> {
   }
 
   const checkTemplateOwner = registerTemplateDrafts(app, { db, config, requireHost, docSchema: DOC, fieldsSchema: LIBRARY_FIELDS })
+  // 批注（08 第 3 节）：宿主和各模式的文档令牌都能看
+  registerComments(app, {
+    db,
+    hub,
+    who: async (req, id) => {
+      const c = await callerFor(req, id)
+      return { userId: operatorOf(c), name: nameOf(c), mode: c.kind === 'host' ? null : c.token.mode }
+    },
+  })
+  // 版本历史（08 第 3 节）：令牌看到的快照按它的字段权限剔除隐藏值
+  registerRevisions(app, {
+    db,
+    who: async (req, id) => {
+      const c = await callerFor(req, id)
+      return c.kind === 'host' ? { mode: null, perms: null } : { mode: c.token.mode, perms: c.perms }
+    },
+  })
 
   // 建模板：传文档 JSON，或者传 docx（base64，经渲染服务转成文档，返回导入报告）
   app.post('/api/templates', async (req) => {
@@ -300,7 +403,11 @@ export async function buildApp(deps: AppDeps): Promise<FastifyInstance> {
     const filled = applyFill(snapshot.doc, { values: {} }, patch, fields, Object.fromEntries(fields.map((f) => [f.key, 'editable' as const])))
     if (!filled.ok) throw new HttpError(400, filled.code, filled.error)
     const id = newId()
-    await db.insert(document).values({ id, templateVersionId: v.id, bizKey: body.bizKey ?? null, title: body.title ?? t?.name ?? '未命名', doc: filled.data, values: filled.values, fields })
+    await db.transaction(async (tx) => {
+      await tx.insert(document).values({ id, templateVersionId: v.id, bizKey: body.bizKey ?? null, title: body.title ?? t?.name ?? '未命名', doc: filled.data, values: filled.values, fields })
+      // 第一版：版本对比时能和最初的样子比
+      await recordRevision(tx, { documentId: id, version: 1, reason: 'create', doc: filled.data, values: filled.values, operator: operatorOf(caller), operatorName: nameOf(caller) })
+    })
     return { id, version: 1 }
   })
 
@@ -316,28 +423,224 @@ export async function buildApp(deps: AppDeps): Promise<FastifyInstance> {
     return { ...base, mode: caller.token.mode, permissions: caller.perms, actions: caller.actions, doc: safe.data, values: safe.values }
   })
 
+  // ---------- 多人编辑（08 第 3 节）：事件流和在场 ----------
+  // GET .../events：text/event-stream。先发 hello（自己的连接 id、版本、状态），之后有 presence、fields、doc、lock、status、comments 这些事件；
+  // 25 秒一个心跳注释，令牌过期时服务端断开（客户端重连时重新鉴权）
+  app.get<{ Params: { id: string }; Querystring: Record<string, string> }>('/api/documents/:id/events', async (req, reply) => {
+    const id = parse(ID, req.params.id)
+    // since：客户端已经有的版本号（重连时用），hello 里补发这之后的改动
+    const q = parse(z.object({ since: z.coerce.number().int().nonnegative().optional() }), req.query)
+    const caller = await callerFor(req, id)
+    // 字段定义先取（推送按它的默认权限剔除隐藏字段，进频道前就要有）；文档的其他内容进频道之后再取，中间别人保存的不会漏
+    const [head] = await db.select({ fields: document.fields }).from(document).where(eq(document.id, id)).limit(1)
+    if (!head) throw new HttpError(404, 'NOT_FOUND', '文档不存在')
+    reply.hijack()
+    const raw = reply.raw
+    raw.writeHead(200, { 'Content-Type': 'text/event-stream; charset=utf-8', 'Cache-Control': 'no-cache, no-transform', Connection: 'keep-alive', 'X-Accel-Buffering': 'no' })
+    raw.write('retry: 3000\n\n')
+    let open = true
+    // hello 发出去之前收到的推送先攒着，hello 之后按顺序发
+    let pending: string[] | null = []
+    const write = (event: string, data: unknown) => {
+      if (!open) return
+      const line = `event: ${event}\ndata: ${JSON.stringify(data)}\n\n`
+      if (pending) pending.push(line)
+      else raw.write(line)
+    }
+    const sub: Subscriber = {
+      conn: newId(),
+      documentId: id,
+      userId: operatorOf(caller),
+      name: nameOf(caller),
+      mode: caller.kind === 'token' ? caller.token.mode : 'edit',
+      field: null,
+      tokenId: caller.kind === 'token' ? caller.token.tid : null,
+      perms: caller.kind === 'token' ? caller.perms : null,
+      defaults: Object.fromEntries(head.fields.map((f) => [f.key, f.permission ?? 'editable'])),
+      send: write,
+      end: () => {
+        if (open) raw.end()
+      },
+    }
+    hub.add(sub)
+    const ping = setInterval(() => open && raw.write(': ping\n\n'), 25_000)
+    const expire = caller.kind === 'token' ? setTimeout(() => sub.end(), Math.max(0, caller.token.exp - Date.now())) : undefined
+    const done = () => {
+      if (!open) return
+      open = false
+      clearInterval(ping)
+      clearTimeout(expire)
+      hub.remove(sub)
+      // 这条连接拿着编辑锁就放掉（关了标签页、断网），别人马上能编辑；断线重连的同一个人会重新拿
+      void db
+        .update(document)
+        .set(clearLock)
+        .where(and(eq(document.id, id), eq(document.editLockConn, sub.conn)))
+        .then((r) => {
+          if (r[0].affectedRows) publishLock(id, null)
+        })
+        .catch(() => {})
+    }
+    raw.on('close', done)
+    req.raw.on('close', done)
+    const [row] = await db.select().from(document).where(eq(document.id, id)).limit(1)
+    if (!row || !open) return sub.end()
+    const lock = row.editLockUser && row.editLockExpires && row.editLockExpires.getTime() > Date.now() ? { userId: row.editLockUser, name: row.editLockName ?? row.editLockUser, conn: row.editLockConn ?? undefined, expiresAt: row.editLockExpires } : null
+    raw.write(`event: hello\ndata: ${JSON.stringify({ conn: sub.conn, userId: sub.userId, name: sub.name, version: row.version, status: row.status, lock, ...(q.since !== undefined && q.since < row.version ? { changes: changesSince(row, q.since, sub) } : {}) })}\n\n`)
+    for (const line of pending ?? []) raw.write(line)
+    pending = null
+    hub.presence(id)
+  })
+
+  /** 重连补发：since 之后别人改过的字段（这个连接看得到的）、可编辑区，正文有没有整份改过 */
+  function changesSince(row: typeof document.$inferSelect, since: number, sub: Subscriber) {
+    const later = Object.entries(row.fieldVersions ?? {}).filter(([k, f]) => f.v > since && (k.startsWith('area:') || sees(sub, k)))
+    const areas = Object.fromEntries(
+      areaAnchors(row.doc)
+        .filter((a) => later.some(([k]) => k === `area:${a.anchor}`))
+        .map((a) => [a.anchor, areaRuns(a.el.valueList)]),
+    )
+    return {
+      values: Object.fromEntries(later.filter(([k]) => !k.startsWith('area:')).map(([k]) => [k, row.values.values[k] ?? null])),
+      areas,
+      versions: Object.fromEntries(later.map(([k, f]) => [k, f.v])),
+      body: row.bodyVersion > since,
+    }
+  }
+
+  // ---------- 正文编辑锁（08 第 3 节）：编辑模式同一时间只有一条连接能改正文 ----------
+  // 锁挂在事件流连接上：拿锁、续约要带自己的连接 id；连接断了锁就放掉；120 秒没续约算过期（后台标签页的定时器会被浏览器放慢）。
+  // 同一个人的连接断了、换了新连接（断线重连）可以直接接过来
+  const LOCK_TTL_MS = 120_000
+  type DocRow = typeof document.$inferSelect
+  const lockOf = (row: DocRow) =>
+    row.editLockUser && row.editLockConn && row.editLockExpires && row.editLockExpires.getTime() > Date.now()
+      ? { userId: row.editLockUser, name: row.editLockName ?? row.editLockUser, conn: row.editLockConn, expiresAt: row.editLockExpires }
+      : null
+  /** 这条连接能不能用这把锁：锁空着、过期了、就是它的，或者是同一个人、原来那条连接已经断了 */
+  const lockFree = (row: DocRow, conn: string, userId: string) => {
+    const lock = lockOf(row)
+    return !lock || lock.conn === conn || (lock.userId === userId && !hub.get(row.id, lock.conn))
+  }
+  const publishLock = (id: string, lock: ReturnType<typeof lockOf>) => hub.publish(id, 'lock', () => ({ lock }))
+  const clearLock = { editLockUser: null, editLockName: null, editLockConn: null, editLockExpires: null }
+
+  app.post<{ Params: { id: string } }>('/api/documents/:id/lock', async (req) => {
+    const id = parse(ID, req.params.id)
+    const caller = await callerFor(req, id)
+    if (caller.kind === 'token' && caller.token.mode !== 'edit') throw new HttpError(403, 'MODE_FORBIDDEN', '只有编辑模式能拿编辑锁')
+    // to：交出编辑权时直接交给这条连接（它请求过编辑）
+    const body = parse(z.object({ conn: z.string().uuid(), action: z.enum(['acquire', 'release', 'request']), to: z.string().uuid().optional() }), req.body)
+    const me = operatorOf(caller)
+    const sub = hub.get(id, body.conn)
+    if (!sub || sub.userId !== me || sub.tokenId !== (caller.kind === 'token' ? caller.token.tid : null)) throw new HttpError(404, 'CONNECTION_NOT_FOUND', '事件流连接不存在，请刷新')
+    const target = body.to ? hub.get(id, body.to) : undefined
+    if (body.to && (!target || target.mode !== 'edit')) throw new HttpError(404, 'CONNECTION_NOT_FOUND', '要交给的人已经离开')
+    const r = await db.transaction(async (tx) => {
+      const [row] = await tx.select().from(document).where(eq(document.id, id)).for('update')
+      if (!row) throw new HttpError(404, 'NOT_FOUND', '文档不存在')
+      const before = lockOf(row)
+      if (body.action === 'request') return { ok: !!before && before.conn !== body.conn, lock: before, changed: false }
+      if (body.action === 'acquire') {
+        if (row.status !== 'filling') throw new HttpError(422, 'INVALID_STATUS', `文档${STATUS_NAMES[row.status]}，不能编辑`)
+        if (!lockFree(row, body.conn, me)) return { ok: false, lock: before, changed: false }
+        const lock = { editLockUser: me, editLockName: nameOf(caller), editLockConn: body.conn, editLockExpires: new Date(Date.now() + LOCK_TTL_MS) }
+        await tx.update(document).set(lock).where(eq(document.id, id))
+        return { ok: true, lock: lockOf({ ...row, ...lock }), changed: before?.conn !== body.conn }
+      }
+      // release：只能放自己的；带 to 时直接交给它
+      if (!before || !lockFree(row, body.conn, me)) return { ok: false, lock: before, changed: false }
+      const next = target ? { editLockUser: target.userId, editLockName: target.name, editLockConn: target.conn, editLockExpires: new Date(Date.now() + LOCK_TTL_MS) } : clearLock
+      await tx.update(document).set(next).where(eq(document.id, id))
+      return { ok: true, lock: target ? lockOf({ ...row, ...next }) : null, changed: true }
+    })
+    if (r.changed) publishLock(id, r.lock)
+    // 请求编辑：只告诉拿着锁的那条连接
+    if (body.action === 'request' && r.ok && r.lock) hub.publish(id, 'lock-request', (s) => (s.conn === r.lock!.conn ? { from: { userId: me, name: nameOf(caller), conn: body.conn } } : null))
+    return { ok: r.ok, lock: r.lock }
+  })
+
+  // 告诉别人自己在哪个字段（null：不在字段里）。只能改自己这条连接的
+  app.post<{ Params: { id: string } }>('/api/documents/:id/presence', async (req) => {
+    const id = parse(ID, req.params.id)
+    const caller = await callerFor(req, id)
+    const body = parse(z.object({ conn: z.string().uuid(), field: z.string().min(1).max(100).nullable() }), req.body)
+    const sub = hub.get(id, body.conn)
+    const mine = sub && sub.userId === operatorOf(caller) && sub.tokenId === (caller.kind === 'token' ? caller.token.tid : null)
+    if (!sub || !mine) throw new HttpError(404, 'CONNECTION_NOT_FOUND', '事件流连接不存在，请刷新')
+    hub.setField(sub, body.field)
+    return { ok: true }
+  })
+
   // 编辑模式保存整份文档
   app.put<{ Params: { id: string } }>('/api/documents/:id', async (req) => {
     const id = parse(ID, req.params.id)
     const caller = await callerFor(req, id)
     if (caller.kind === 'token' && caller.token.mode !== 'edit') throw new HttpError(403, 'MODE_FORBIDDEN', '只有编辑模式能保存整份文档')
+    // base、conn 和 PATCH 一样（多人编辑才带）：base 里是编辑器这次改了的字段和可编辑区，其余的以服务端为准
     const body = parse(
-      z.object({ doc: DOC, values: z.object({ values: VALUES }).passthrough().optional(), version: z.number().int().positive(), pageCount: PAGE_COUNT }),
+      z.object({
+        doc: DOC,
+        values: z.object({ values: VALUES }).passthrough().optional(),
+        version: z.number().int().positive(),
+        pageCount: PAGE_COUNT,
+        base: z.record(z.string().min(1).max(110), z.number().int().nonnegative()).optional(),
+        conn: z.string().uuid().optional(),
+      }),
       req.body,
     )
     await deps.hooks?.afterAuth?.(req)
-    const version = await db.transaction(async (tx) => {
+    const saved = await db.transaction(async (tx) => {
       await lockToken(tx, caller)
-      const row = await lockDocument(tx, id, body.version)
+      // 编辑正文的同时别人可能在填字段：基准版本之后正文没被别人整份保存过就能存，期间别人保存的字段值合并进来（08 第 3 节）
+      const row = await lockDocument(tx, id, body.version, !!body.base)
       // 令牌拿到的文档剔除过隐藏值（GET 时按权限清空了）：整份存回去会把隐藏字段的值清掉，拒绝
       if (seesStripped(caller, row.fields)) throw new HttpError(403, 'HIDDEN_FIELDS', '这个令牌有隐藏字段，拿到的文档不全，不能整份保存')
+      // 别人拿着编辑锁时不能整份保存（没人拿锁时照旧：不用多人编辑的宿主不受影响）
+      const lock = lockOf(row)
+      if (lock && !(body.conn && lockFree(row, body.conn, operatorOf(caller)))) throw new HttpError(423, 'LOCKED', `${lock.name}正在编辑，不能保存`, { lock })
+      if (body.base) {
+        const conflicts = conflictsOf(row, Object.keys(body.base), body.base, body.conn)
+        if (conflicts.length) throw new HttpError(409, 'FIELD_CONFLICT', `${conflicts.map((c) => c.by).join('、')}刚改过 ${conflicts.length} 项，这次没有保存`, { conflicts, version: row.version })
+      }
+      let doc = body.doc as DocData
+      let values = (body.values as DocValues | undefined) ?? row.values
+      const merged = row.version !== body.version
+      if (merged) {
+        // 编辑器没改、别人在它的基准版本之后改过的字段和可编辑区：用服务端的
+        const later = Object.entries(row.fieldVersions ?? {}).filter(([k, f]) => f.v > body.version && !(k in body.base!)).map(([k]) => k)
+        const all = Object.fromEntries(row.fields.map((f) => [f.key, 'editable' as const]))
+        // 一个一个写：正文里删掉了的字段写不进去就跳过（值仍在数据 JSON 里）；计算字段跟着来源字段重算
+        for (const k of later.filter((k) => !k.startsWith('area:'))) {
+          const r = applyFill(doc, values, { [k]: row.values.values[k] ?? null }, row.fields, all)
+          if (r.ok) ({ data: doc, values } = r)
+        }
+        const areaKeys = later.filter((k) => k.startsWith('area:')).map((k) => k.slice(5))
+        const current = Object.fromEntries(areaAnchors(row.doc).filter((a) => areaKeys.includes(a.anchor)).map((a) => [a.anchor, areaRuns(a.el.valueList)]))
+        for (const [anchor, runs] of Object.entries(current)) {
+          const r = applyAreas(doc, { [anchor]: runs })
+          if (r.ok) doc = r.data
+        }
+      }
+      // 条件条款按存下的字段值重算显示不显示（宿主自己拼的文档也对）
+      doc = applyConditions(doc, values.values)
+      const version = row.version + 1
+      // 这次改了哪些字段、可编辑区：记版本（别人填写时按它查冲突）
+      const before = new Map(areaAnchors(row.doc).map((a) => [a.anchor, JSON.stringify(areaRuns(a.el.valueList))]))
+      const areaKeys = areaAnchors(doc).filter((a) => before.get(a.anchor) !== JSON.stringify(areaRuns(a.el.valueList))).map((a) => `area:${a.anchor}`)
+      const fieldVersions = bumpFields(row.fieldVersions, [...changedKeys(row.values.values, values.values), ...areaKeys], version, caller, body.conn)
+      // 拿着锁的保存顺带续约
+      const renew = lock ? { editLockExpires: new Date(Date.now() + LOCK_TTL_MS) } : {}
       await tx
         .update(document)
-        .set({ doc: body.doc as DocData, values: (body.values as DocValues | undefined) ?? row.values, version: row.version + 1, pageCount: body.pageCount ?? null, updatedAt: new Date() })
+        .set({ doc, values, version, bodyVersion: version, fieldVersions, pageCount: merged ? null : (body.pageCount ?? null), ...renew, updatedAt: new Date() })
         .where(eq(document.id, id))
-      return row.version + 1
+      await recordRevision(tx, { documentId: id, version, reason: 'edit', doc, values, operator: operatorOf(caller), operatorName: nameOf(caller) })
+      return { version, merged }
     })
-    return { id, version }
+    // 别人那边的正文要换成这一版（编辑器收到后重新装文档，08 第 3 节）
+    hub.publish(id, 'doc', () => ({ version: saved.version, by: { userId: operatorOf(caller), name: nameOf(caller) } }), body.conn)
+    return { id, version: saved.version, ...(saved.merged ? { merged: true } : {}) }
   })
 
   // 填写模式保存：只提交字段值，服务端按当前权限写进文档
@@ -347,26 +650,46 @@ export async function buildApp(deps: AppDeps): Promise<FastifyInstance> {
     if (caller.kind === 'token' && caller.token.mode !== 'fill' && caller.token.mode !== 'edit')
       throw new HttpError(403, 'MODE_FORBIDDEN', `${caller.token.mode} 模式不能改字段`)
     // areas：可编辑区（按 anchor），给一段文字或一组带样式的文字；只有模板里标成可编辑区的能改（方案 4.2、4.7），内容由 core 的 applyAreas 校验
+    // 多人编辑（08 第 3 节）：base 是每个提交的字段（可编辑区是 area:anchor）客户端看到的版本，带了 base 就按字段合并，
+    // 别人在那之后改过的字段整次拒绝（409 FIELD_CONFLICT，带现在的值和改的人）；conn 是发起保存的事件流连接，推送时不推回给它
     const body = parse(
-      z.object({ patch: VALUES, areas: z.record(AREA_ANCHOR, AREA_CONTENT).optional(), version: z.number().int().positive(), pageCount: PAGE_COUNT }),
+      z.object({
+        patch: VALUES,
+        areas: z.record(AREA_ANCHOR, AREA_CONTENT).optional(),
+        version: z.number().int().positive(),
+        pageCount: PAGE_COUNT,
+        base: z.record(z.string().min(1).max(110), z.number().int().nonnegative()).optional(),
+        conn: z.string().uuid().optional(),
+      }),
       req.body,
     )
     await deps.hooks?.afterAuth?.(req)
-    return db.transaction(async (tx) => {
+    const saved = await db.transaction(async (tx) => {
       const locked = await lockToken(tx, caller)
-      const row = await lockDocument(tx, id, body.version)
+      const row = await lockDocument(tx, id, body.version, !!body.base)
+      const merged = row.version !== body.version
+      const areaPatch = (body.areas ?? {}) as Record<string, string | AreaRun[]>
+      if (body.base) {
+        const conflicts = conflictsOf(row, [...Object.keys(body.patch), ...Object.keys(areaPatch).map((a) => `area:${a}`)], body.base, body.conn)
+        if (conflicts.length) throw new HttpError(409, 'FIELD_CONFLICT', `${conflicts.map((c) => c.by).join('、')}刚改过 ${conflicts.length} 项，这次没有保存`, { conflicts, version: row.version })
+      }
       const perms = locked ?? Object.fromEntries(row.fields.map((f) => [f.key, 'editable' as const]))
       const filled = applyFill(row.doc, row.values, body.patch, row.fields, perms)
       if (!filled.ok) throw new HttpError(filled.code === 'PERMISSION_DENIED' ? 403 : 400, filled.code, filled.error)
-      const areas = applyAreas(filled.data, (body.areas ?? {}) as Record<string, string | AreaRun[]>)
+      const areas = applyAreas(filled.data, areaPatch)
       if (!areas.ok) throw new HttpError(AREA_STATUS[areas.code], areas.code, areas.error, { area: areas.area })
       const doc = areas.data
-      // 页数：编辑器保存时带（按打印模式数）；宿主直接改值时不知道、看到的文档剔除过隐藏值时数得不对，清空，导出时不核对
-      const pageCount = seesStripped(caller, row.fields) ? null : (body.pageCount ?? null)
-      await tx.update(document).set({ doc, values: filled.values, version: row.version + 1, pageCount, updatedAt: new Date() }).where(eq(document.id, id))
+      const version = row.version + 1
+      const keys = changedKeys(row.values.values, filled.values.values)
+      const fieldVersions = bumpFields(row.fieldVersions, [...keys, ...Object.keys(areaPatch).map((a) => `area:${a}`)], version, caller, body.conn)
+      // 页数：编辑器保存时带（按打印模式数）；合并了别人的改动、宿主直接改值、看到的文档剔除过隐藏值时数得不对，清空，导出时不核对
+      const pageCount = merged || seesStripped(caller, row.fields) ? null : (body.pageCount ?? null)
+      await tx.update(document).set({ doc, values: filled.values, version, pageCount, fieldVersions, updatedAt: new Date() }).where(eq(document.id, id))
       const safe = caller.kind === 'token' ? stripHidden(doc, filled.values, row.fields, perms).values : filled.values
-      return { id, version: row.version + 1, values: safe }
+      return { response: { id, version, values: safe, ...(merged ? { merged: true } : {}) }, changed: Object.fromEntries(keys.map((k) => [k, filled.values.values[k] ?? null])) }
     })
+    publishFields(id, saved.response.version, saved.changed, body.areas, caller, body.conn)
+    return saved.response
   })
 
   // ---------- 出文件（方案 4.9、第 12 节第 1 轮第 3 条；验收 1、15；07 第 2 节加 html、txt）----------
@@ -471,7 +794,7 @@ export async function buildApp(deps: AppDeps): Promise<FastifyInstance> {
     await deps.hooks?.afterAuth?.(req)
     const operator = caller.kind === 'host' ? `host:${caller.clientId}` : caller.token.uid
     try {
-      return await db.transaction(async (tx) => {
+      const r = await db.transaction(async (tx) => {
         const locked = await lockToken(tx, caller)
         const row = await lockDocument(tx, id, body.version)
         const perms = locked ?? Object.fromEntries(row.fields.map((f) => [f.key, 'editable' as const]))
@@ -504,14 +827,25 @@ export async function buildApp(deps: AppDeps): Promise<FastifyInstance> {
             created.push(...r.created)
           }
         }
+        // 插进来、改过的条款里可能有条件条款：按现在的值重算显示不显示
+        data = applyConditions(data, values.values)
         const version = row.version + 1
         const at = new Date()
+        // 只有 setData 是改字段；别的操作改了正文（多人编辑时别人要重新装文档）
+        const bodyChanged = ops.some((o) => o.op !== 'setData')
+        const keys = changedKeys(row.values.values, values.values)
+        const fieldVersions = bumpFields(row.fieldVersions, keys, version, caller)
         // 改了正文或字段，编辑器上次数的页数不再可信
-        await tx.update(document).set({ doc: data, values, version, pageCount: null, updatedAt: at }).where(eq(document.id, id))
+        await tx.update(document).set({ doc: data, values, version, pageCount: null, fieldVersions, ...(bodyChanged ? { bodyVersion: version } : {}), updatedAt: at }).where(eq(document.id, id))
         await tx.insert(operationLog).values({ id: newId(), documentId: id, ops, result: { ok: true, version, created }, operator, at })
+        // 改了正文的和编辑模式保存一样存一版；只改字段值的不存
+        if (bodyChanged) await recordRevision(tx, { documentId: id, version, reason: 'edit', doc: data, values, operator, operatorName: nameOf(caller) })
         const safe = caller.kind === 'token' ? stripHidden(data, values, row.fields, perms).values : values
-        return { id, version, created, values: safe }
+        return { response: { id, version, created, values: safe }, bodyChanged, changed: Object.fromEntries(keys.map((k) => [k, values.values[k] ?? null])) }
       })
+      if (r.bodyChanged) hub.publish(id, 'doc', () => ({ version: r.response.version, by: { userId: operatorOf(caller), name: nameOf(caller) } }))
+      else publishFields(id, r.response.version, r.changed, undefined, caller)
+      return r.response
     } catch (e) {
       // 失败也记一笔（事务已回滚，单独写）
       if (e instanceof HttpError && typeof e.detail?.index === 'number')
@@ -616,9 +950,12 @@ export async function buildApp(deps: AppDeps): Promise<FastifyInstance> {
     const caller = await callerFor(req, id)
     const body = parse(STATUS_OP, req.body)
     if (caller.kind === 'token' && !(body.action === 'submit' && caller.token.mode === 'seal')) throw new HttpError(403, 'MODE_FORBIDDEN', '文档令牌只能提交盖章')
-    return db.transaction(async (tx) => {
+    const result = await db.transaction(async (tx) => {
       await lockToken(tx, caller)
       const { row } = await lockFor(tx, id, body.version, FROM[body.action])
+      // 开始盖章后正文就定了：还有没接受、拒绝的修订时不能开始（盖的是哪一版说不清）
+      const pending = body.action === 'start' ? traceChanges(row.doc).length : 0
+      if (pending) throw new HttpError(422, 'PENDING_REVISIONS', `还有 ${pending} 处修订没有接受或拒绝，处理完再开始盖章`)
       const at = new Date()
       const operator = operatorOf(caller)
       let doc = row.doc
@@ -635,10 +972,17 @@ export async function buildApp(deps: AppDeps): Promise<FastifyInstance> {
       const status = TO[body.action]
       const version = row.version + 1
       const lockedAt = status === 'sealing' || status === 'sealed' ? (row.lockedAt ?? at) : status === 'filling' ? null : row.lockedAt
-      await tx.update(document).set({ status, doc, version, lockedAt, updatedAt: at }).where(eq(document.id, id))
+      // 离开填写中（开始盖章、作废）正文就不能改了：编辑锁一起放掉
+      const unlock = status !== 'filling' ? clearLock : {}
+      await tx.update(document).set({ status, doc, version, lockedAt, ...unlock, updatedAt: at }).where(eq(document.id, id))
       await tx.insert(operationLog).values({ id: newId(), documentId: id, ops: body, result: { ok: true, from: row.status, to: status, version, voided }, operator, at })
+      await recordRevision(tx, { documentId: id, version, reason: body.action, doc, values: row.values, operator, operatorName: nameOf(caller) })
       return { id, version, status, voided }
     })
+    // 状态变了（开始盖章、提交、驳回、作废）：打开着的人都要知道，编辑、填写的要变只读；编辑锁已经放掉
+    hub.publish(id, 'status', () => ({ status: result.status, version: result.version, by: { userId: operatorOf(caller), name: nameOf(caller) } }))
+    if (result.status !== 'filling') publishLock(id, null)
+    return result
   })
 
   app.post('/api/tokens', async (req) => {
@@ -648,6 +992,8 @@ export async function buildApp(deps: AppDeps): Promise<FastifyInstance> {
         documentId: ID,
         mode: MODE,
         userId: z.string().min(1).max(100),
+        // 显示用的名字（在场、批注、编辑锁），不给就显示 userId
+        userName: z.string().min(1).max(100).optional(),
         permissions: z.record(z.string(), PERMISSION).default({}),
         // 能不能打印、下载，不给都能
         actions: z.object({ print: z.boolean().optional(), download: z.boolean().optional() }).optional(),
@@ -662,11 +1008,11 @@ export async function buildApp(deps: AppDeps): Promise<FastifyInstance> {
     const canPrint = body.actions?.print ?? true
     const canDownload = body.actions?.download ?? true
     await db.transaction(async (tx) => {
-      await tx.insert(docToken).values({ id: tid, documentId: body.documentId, mode: body.mode, userId: body.userId, canPrint, canDownload, expiresAt })
+      await tx.insert(docToken).values({ id: tid, documentId: body.documentId, mode: body.mode, userId: body.userId, userName: body.userName ?? null, canPrint, canDownload, expiresAt })
       const rows = Object.entries(body.permissions).map(([fieldKey, permission]) => ({ tokenId: tid, fieldKey, permission }))
       if (rows.length) await tx.insert(tokenPermission).values(rows)
     })
-    const token = signToken(config.TOKEN_SECRET, { tid, did: body.documentId, mode: body.mode, uid: body.userId, exp: expiresAt.getTime() })
+    const token = signToken(config.TOKEN_SECRET, { tid, did: body.documentId, mode: body.mode, uid: body.userId, ...(body.userName ? { un: body.userName } : {}), exp: expiresAt.getTime() })
     return { id: tid, token, expiresAt, actions: { print: canPrint, download: canDownload } }
   })
 
@@ -681,6 +1027,8 @@ export async function buildApp(deps: AppDeps): Promise<FastifyInstance> {
       const rows = Object.entries(body.permissions).map(([fieldKey, permission]) => ({ tokenId: id, fieldKey, permission }))
       if (rows.length) await tx.insert(tokenPermission).values(rows)
     })
+    // 事件流按旧权限推字段值：断开，重连时按新权限
+    hub.closeToken(id)
     return { id }
   })
 
@@ -692,6 +1040,7 @@ export async function buildApp(deps: AppDeps): Promise<FastifyInstance> {
       if (!row) throw new HttpError(404, 'NOT_FOUND', '令牌不存在')
       await tx.update(docToken).set({ revokedAt: new Date() }).where(eq(docToken.id, id))
     })
+    hub.closeToken(id)
     return { id, revoked: true }
   })
 

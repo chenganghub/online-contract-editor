@@ -145,6 +145,8 @@ test('快捷插入保留日期正文，样例预览不改模板', async ({ page 
     const c = (window as unknown as { __oe: EditorHandle }).__oe.editor!.command
     c.executeSetValue({ main: [{ value: '日期：' }] }); c.executeSetRange(3, 3); c.executeFocus()
   })
+  // canvas-editor 聚焦它的输入框是异步的：聚焦前按的键会丢（这个用例偶尔少第一个字的原因）
+  await expect.poll(() => page.evaluate(() => document.activeElement?.classList.contains('ce-inputarea'))).toBe(true)
   await page.keyboard.type('2026/3/18')
   await expect(page.locator('.field-chooser')).toHaveCount(0)
   await expect.poll(() => page.evaluate(() => (window as unknown as { __oe: EditorHandle }).__oe.getData().doc.main.map((e) => e.value).join(''))).toContain('2026/3/18')
@@ -256,7 +258,9 @@ test('无代码设计发布，宿主按订单建合同，客户联填与字典�
   for (const value of ['赊销付款', '上海浦江重型装备股份有限公司', '上海市闵行区江川路 1800 号', '91310112MA1K4B2X7Q']) expect(reopenedText).toContain(value)
   const retrieved = await server.app.inject({ method: 'GET', url: `/api/documents/${fresh.json().id}`, headers: host() })
   expect(retrieved.statusCode).toBe(200)
-  expect(retrieved.json().values.values).toEqual(data.values.values)
+  // 多人编辑（docs/设计/08）后宿主只提交改过的字段，没填过的字段服务端不存空值，编辑器读出来是 null、[]：比填了的
+  const filled = (v: Record<string, unknown>) => Object.fromEntries(Object.entries(v).filter(([, x]) => x !== null && x !== '' && !(Array.isArray(x) && !x.length)))
+  expect(filled(retrieved.json().values.values)).toEqual(filled(data.values.values))
   const deniedCustomer = await request.get(`${origin}api/customers?q=上海`)
   expect(deniedCustomer.status()).toBe(401)
   const oldDoc = (await server.app.inject({ method: 'GET', url: `/api/documents/${old.json().id}`, headers: host() })).json()

@@ -1,7 +1,7 @@
 // 插件导出 docx 后再修一遍（方案 4.10）：写默认字体、写重复标题行、横向页面、页眉距离、表格列宽和单元格边距、行尾空格的下划线。
 // 控件的花括号、制表符在导出前处理（prepareForExport）。
 import JSZip from 'jszip'
-import { choicesAsText, DEFAULT_FONT, DEFAULT_SIZE, type DocData } from '@oe/core'
+import { choicesAsText, DEFAULT_FONT, DEFAULT_SIZE, resolveTraces, type DocData } from '@oe/core'
 import { tablesOf, walk, type Doc, type El } from './model'
 import { attr, directChildren, escapeAttr, spans } from './xml'
 
@@ -25,9 +25,10 @@ const HEADER_TOP = 30
  *   给它一个值，插件才会写出 <w:tab/>。
  * - 区域、列表：见 flatten；段前段后间距：见 markSpacing（s13 WPS 对比）
  * - 复选、单选控件：写成「☑空调 ☐网络」这样的字（@oe/core 的 choicesAsText）。插件在打印模式下拿到的只有选项文字，勾就丢了
+ * - 修订：按全部接受后的样子导出（删掉的字不要，插入的字照常），和编辑器、PDF 上看到的一样；插件不认 trace，删掉的字会照常写出来
  */
 export function prepareForExport<T extends Doc>(doc: T, options: { defaultSize?: number } = {}): T {
-  const out = choicesAsText(doc as unknown as DocData) as unknown as T
+  const out = choicesAsText(resolveTraces(doc as unknown as DocData, 'accept')) as unknown as T
   const size = options.defaultSize ?? DEFAULT_SIZE
   // 标记用的私用区字符是保留的：文字里本来就有的先去掉，免得被当成标记
   for (const zone of [out.header, out.main, out.footer]) for (const el of walk(zone)) if (typeof el.value === 'string') el.value = el.value.replace(RESERVED, '')

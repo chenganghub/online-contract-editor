@@ -91,7 +91,9 @@ try {
     params.delete('fromTemplate'); params.delete('version'); params.set('doc', docId); params.set('mode', 'fill')
     history.replaceState(null, '', `?${params}`)
   }
-  const host = templateId ? await connectTemplate(templateId) : docId ? await connectServer(docId, openingMode, permissions, actions) : local
+  // 多人编辑演示：两个窗口用 ?user=张三、?user=李四 打开同一个 ?doc=
+  const user = params.get('user')
+  const host = templateId ? await connectTemplate(templateId) : docId ? await connectServer(docId, openingMode, permissions, actions, user ? { id: user, name: user } : undefined) : local
   const handle = await createEditor(el, { ...host, seals: demoSeals(), request, dataSources: DATA_SOURCES, importDocx: pages ? undefined : importDocx, previewSamples: sample.preview })
   // 给端到端测试用
   ;(window as unknown as { __oe: unknown }).__oe = handle

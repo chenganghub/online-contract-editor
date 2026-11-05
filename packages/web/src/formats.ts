@@ -94,6 +94,14 @@ export function shortcut(key: string, o: { shift?: boolean; alt?: boolean; ctrl?
 /** 按钮的悬停提示：名称加快捷键 */
 export const tip = (name: string, keys?: string) => (keys ? `${name}（${keys}）` : name)
 
+/** 批注、修订、版本里的时间：今天的只写时分，别的写月日 */
+export function shortTime(at: string | number | Date): string {
+  const d = new Date(at)
+  const pad = (n: number) => String(n).padStart(2, '0')
+  const today = new Date().toDateString() === d.toDateString()
+  return today ? `${pad(d.getHours())}:${pad(d.getMinutes())}` : `${d.getMonth() + 1}月${d.getDate()}日 ${pad(d.getHours())}:${pad(d.getMinutes())}`
+}
+
 /** 光标处的文字样式（rangeStyleChange 给的），格式栏按它显示 */
 export interface FormatState {
   bold: boolean
@@ -118,4 +126,8 @@ export interface FormatState {
   area: boolean
   /** 能设可编辑区（选中了文字，或光标在区域里） */
   canArea: boolean
+  /** 光标在条件条款里（t11） */
+  condition: boolean
+  /** 能设条件条款（选中了一段正文，或光标在条件条款里） */
+  canCondition: boolean
 }

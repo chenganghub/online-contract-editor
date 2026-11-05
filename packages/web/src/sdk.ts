@@ -15,7 +15,7 @@ export interface EditorHandle {
   getData(): SavePayload
   /** 写字段值；表格循环传记录数组，图片传 dataURL。值不合法时抛错，这一批都不生效 */
   setData(values: Record<string, FieldValue>): void
-  /** missing：必填没填的字段；invalid：数字、金额不是数字的字段 */
+  /** missing：必填没填的字段；invalid：数字、金额不是数字，或者不合校验规则的字段（填写模式只查填写的人能改的） */
   validate(): { ok: boolean; missing: string[]; invalid: string[] }
   save(): Promise<void>
   /** 有没有没保存的修改（编辑、导入过，还没保存成功）；宿主切路由前可以用它提醒 */
@@ -64,6 +64,7 @@ export async function createEditor(el: HTMLElement, options: EditorOptions): Pro
         title: loaded.title,
         doc: loaded.doc,
         values: loaded.values,
+        version: loaded.version,
         fields: loaded.fields,
         libraryFields: loaded.libraryFields,
         permissions: loaded.permissions,
@@ -77,6 +78,7 @@ export async function createEditor(el: HTMLElement, options: EditorOptions): Pro
         onSeal: options.onSeal,
         importDocx: options.importDocx,
         confirmLeave: options.confirmLeave,
+        collab: options.collab,
         onReady: () => {
           ready()
           fire('ready')()

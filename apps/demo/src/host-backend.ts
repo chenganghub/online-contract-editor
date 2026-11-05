@@ -13,6 +13,8 @@ export interface TokenRequest {
   mode: Mode
   permissions?: Record<string, Permission>
   actions?: DocActions
+  /** 演示用：地址上 ?user= 模拟的用户（真实宿主按自己的登录态定是谁） */
+  user?: { id: string; name: string }
 }
 
 export const DEMO_USER = 'demo-user'
@@ -49,7 +51,9 @@ export async function issueToken(api: ServerApi, authorization: string | undefin
     const s = await api('POST', `${path}/seal-status`, { action: 'start', version })
     if (s.status !== 200) return s
   } else if (mode !== 'view' && status !== NEEDS[mode]) mode = 'view'
-  const t = await api('POST', '/api/tokens', { documentId: req.documentId, mode, userId: DEMO_USER, permissions: req.permissions ?? {}, actions: req.actions })
+  // 演示用户：名字 1～20 个字，不合规的按默认用户
+  const user = typeof req.user?.name === 'string' && /^[\p{L}\p{N} _-]{1,20}$/u.test(req.user.name) ? { userId: `demo-${req.user.name}`, userName: req.user.name } : { userId: DEMO_USER }
+  const t = await api('POST', '/api/tokens', { documentId: req.documentId, mode, ...user, permissions: req.permissions ?? {}, actions: req.actions })
   return t.status === 200 ? { status: 200, json: { token: (t.json as { token: string }).token } } : t
 }
 

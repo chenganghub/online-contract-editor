@@ -236,6 +236,23 @@ export function docParts(doc: DocData, kind: 'html' | 'text'): DocParts {
   }
 }
 
+/** 在不显示的编辑器里按打印模式装好文档，做完就销毁（编辑模式里条件条款都显示，导出、打印、数页数要按存下的样子出） */
+async function inPrintEditor<T>(doc: DocData, fn: (ed: Editor) => Promise<T>): Promise<T> {
+  const holder = hiddenHolder()
+  const ed = new Editor(holder, doc as never, { ...BASE, ...layoutOptions(doc.page), mode: EditorMode.PRINT } as unknown as IEditorOption)
+  try {
+    await nextFrame()
+    return await fn(ed)
+  } finally {
+    ed.destroy()
+    holder.remove()
+  }
+}
+/** 打印模式的页面图 */
+export const pageImagesOf = (doc: DocData, pixelRatio: number) => inPrintEditor(doc, async (ed) => (await ed.command.getImage({ pixelRatio, mode: EditorMode.PRINT })) as string[])
+/** 打印（浏览器的打印对话框） */
+export const printOf = (doc: DocData) => inPrintEditor(doc, (ed) => ed.command.executePrint() as Promise<void>)
+
 /** 编辑器文档 → docx。区域、列表拆成普通段落再交给插件，导出后修正默认字体、表头、横向、间距（@oe/docx） */
 export async function exportDocxInBrowser(doc: DocData): Promise<Blob> {
   const [{ prepareForExport, exportInfo, fixExportedDocx }, plugin] = await Promise.all([import('@oe/docx'), loadDocxPlugin()])

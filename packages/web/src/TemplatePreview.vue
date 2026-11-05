@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { nextTick, onBeforeUnmount, onMounted, ref } from 'vue'
 import Editor, { EditorMode, type IEditorData, type IEditorOption } from '@hufe921/canvas-editor'
-import { layoutOptions, setFieldValues, type DocData, type FieldDef } from '@oe/core'
+import { applyConditions, layoutOptions, setFieldValues, type DocData, type FieldDef } from '@oe/core'
 import type { PreviewSample } from './types'
 const props = defineProps<{ doc: DocData; fields: FieldDef[]; samples: PreviewSample[] }>()
 defineEmits<{ close: [] }>()
@@ -32,8 +32,10 @@ function render() {
   visit(doc.footer ?? [])
   try {
     const values = Object.fromEntries(Object.entries(props.samples[selected.value]!.values).filter(([key]) => keys.has(key)))
-    setFieldValues(doc as unknown as Parameters<typeof setFieldValues>[0], values, props.fields)
-    editor = new Editor(container.value!, doc as unknown as IEditorData, { ...layoutOptions(doc.page), mode: EditorMode.PRINT } as IEditorOption)
+    const written = setFieldValues(doc as unknown as Parameters<typeof setFieldValues>[0], values, props.fields)
+    // 条件条款按样例的值出
+    const shown = applyConditions(doc, written)
+    editor = new Editor(container.value!, shown as unknown as IEditorData, { ...layoutOptions(doc.page), mode: EditorMode.PRINT } as IEditorOption)
     error.value = ''
   } catch (e) { error.value = e instanceof Error ? e.message : '预览失败' }
 }

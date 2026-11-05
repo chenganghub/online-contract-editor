@@ -36,6 +36,14 @@ export const ICONS = {
   chevronDown: { d: ['M4.5 6.25 8 9.75l3.5-3.5'] },
   chevronUp: { d: ['M4.5 9.75 8 6.25l3.5 3.5'] },
   minus: { d: ['M3.5 8h9'] },
+  // 批注：对话气泡（text.bubble）
+  comment: { d: ['M3.5 3h9A1.5 1.5 0 0 1 14 4.5V10a1.5 1.5 0 0 1-1.5 1.5H8L5 13.75V11.5H3.5A1.5 1.5 0 0 1 2 10V4.5A1.5 1.5 0 0 1 3.5 3z', 'M5 6h6M5 8.5h4'] },
+  // 修订：笔加下面一道线（pencil.line）
+  trace: { d: ['M10.25 2.5l2.25 2.25L6 11.25H3.75V9z', 'M2.5 13.75h11'] },
+  // 版本：带箭头的圆和表针（clock.arrow.circlepath）
+  history: { d: ['M2.75 8a5.25 5.25 0 1 0 1.6-3.75', 'M2.5 2.5v2.5H5', 'M8 5.25V8l2 1.25'] },
+  // 条件条款：一条线分出一个岔（arrow.triangle.branch）
+  branch: { d: ['M4.5 2.5v11', 'M4.5 9c0-2.25 1.5-4 3.75-4h4.25', 'M10.25 2.75 12.5 5l-2.25 2.25'] },
 } satisfies Record<string, IconShape>
 
 export type IconName = keyof typeof ICONS

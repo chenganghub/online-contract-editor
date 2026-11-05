@@ -1,9 +1,22 @@
 // 字段写值：同一个字段（conceptId）在文档里出现几处就写几处，计算字段跟着算；表格循环按数组生成行。
-import { toChineseAmount } from './amount'
 import { OpError } from './errors'
+import { computeValues } from './formula'
 import { clone, controlLocs, elAt, walk, walkDoc, type Ctrl, type Doc, type El, type Tr } from './model'
 import { CONTEXT_ATTRS, CONTROL_STYLE_ATTRS, pick } from './text'
-import type { FieldDef, FieldValue } from './types'
+import type { FieldDef, FieldType, FieldValue, Permission } from './types'
+
+/** 签署方角色（签名区、签署日期的 signer）：模板里按角色绑定，签署时（t12）宿主把签署人对到角色上 */
+export const SIGNER_ROLES = [
+  { key: 'a', label: '甲方' },
+  { key: 'b', label: '乙方' },
+  { key: 'c', label: '丙方' },
+  { key: 'd', label: '丁方' },
+] as const
+/** 签署时才写的字段：填写的人不能改（默认只读），宿主后端能写 */
+export const SIGNING_TYPES: ReadonlySet<FieldType> = new Set(['signature', 'signDate'])
+/** 字段在这次调用里的权限：令牌给的、模板给的，都没有时签署字段只读、其他可编辑 */
+export const permissionOf = (f: FieldDef | undefined, key: string, perms: Record<string, Permission>): Permission =>
+  perms[key] ?? f?.permission ?? (f && SIGNING_TYPES.has(f.type) ? 'readonly' : 'editable')
 
 /** 控件的值元素：和编辑器展开控件时一样，带 type: 'text'、控件自己的文字样式、控件所在段落的属性 */
 export function controlValue(el: El, text: string | null | undefined): El[] {
@@ -104,27 +117,32 @@ function planLoop(doc: Doc, key: string, rows: Record<string, unknown>[]): (() =
   return plans
 }
 
-/** 图片字段：图片元素用 extension.field = 字段 key 标记，值是图片的 dataURL */
-function planImage(doc: Doc, key: string, raw: FieldValue): (() => void)[] {
+/**
+ * 图片字段、签名区：图片元素用 extension.field = 字段 key 标记，值是图片的 dataURL。
+ * 签名区可以清空（拒签、驳回时）：换回元素上存的占位图 extension.placeholder
+ */
+function planImage(doc: Doc, key: string, raw: FieldValue, clearable: boolean): (() => void)[] {
   const targets = [...walkDoc(doc)].map(elAt).filter((el) => el.type === 'image' && el.extension?.field === key)
   if (!targets.length) throw new OpError('FIELD_NOT_FOUND', `文档里没有绑定 ${key} 的图片`)
+  if (clearable && (raw === null || raw === '')) {
+    if (!targets.every((el) => typeof el.extension?.placeholder === 'string')) throw new OpError('BAD_ARGUMENT', `签名区 ${key} 没有占位图，清不掉`)
+    return targets.map((el) => () => {
+      el.value = el.extension!.placeholder as string
+    })
+  }
   if (typeof raw !== 'string' || !raw.startsWith('data:image/')) throw new OpError('BAD_ARGUMENT', `字段 ${key} 的值要是图片 dataURL`)
   return targets.map((el) => () => {
     el.value = raw
   })
 }
 
-/** 把一组字段值写进文档。fields 里有定义的按类型写；计算字段按来源字段重新算 */
-export function setFieldValues(doc: Doc, values: Record<string, FieldValue>, fields: FieldDef[]): Record<string, FieldValue> {
+/**
+ * 把一组字段值写进文档。fields 里有定义的按类型写；受这些值影响的计算字段（金额大写、公式）和循环表的行内公式跟着算。
+ * current 是写之前的全部字段值（公式要用没改的字段），不给当没有
+ */
+export function setFieldValues(doc: Doc, values: Record<string, FieldValue>, fields: FieldDef[], current: Record<string, FieldValue> = {}): Record<string, FieldValue> {
   const defs = new Map(fields.map((f) => [f.key, f]))
-  const all: Record<string, FieldValue> = { ...values }
-  for (const f of fields) {
-    const from = f.computed?.from
-    if (f.computed?.fn === 'amountCN' && from && from in values) {
-      const v = values[from]
-      all[f.key] = v === null || v === '' ? null : toChineseAmount(String(v))
-    }
-  }
+  const all: Record<string, FieldValue> = { ...values, ...computeValues(fields, { ...current, ...values }, new Set(Object.keys(values))) }
   const controls = controlLocs(doc)
   const plans: (() => void)[] = []
   for (const [key, raw] of Object.entries(all)) {
@@ -135,8 +153,8 @@ export function setFieldValues(doc: Doc, values: Record<string, FieldValue>, fie
         plans.push(...planLoop(doc, key, (raw ?? []) as Record<string, unknown>[]))
         continue
       }
-      if (def?.type === 'image') {
-        plans.push(...planImage(doc, key, raw))
+      if (def?.type === 'image' || def?.type === 'signature') {
+        plans.push(...planImage(doc, key, raw, def.type === 'signature'))
         continue
       }
       const targets = controls.filter((l) => elAt(l).control!.conceptId === key)

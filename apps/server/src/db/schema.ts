@@ -50,10 +50,55 @@ export const document = mysqlTable(
     pageCount: int('page_count'),
     version: int('version').notNull().default(1),
     lockedAt: datetime('locked_at', { mode: 'date', fsp: 3 }),
+    // 多人编辑（08 第 3 节）：每个字段最后在哪一版被谁改的（填写时按字段合并用）；正文最后在哪一版整份保存过
+    fieldVersions: json('field_versions').$type<Record<string, { v: number; by: string; name?: string; conn?: string }>>(),
+    bodyVersion: int('body_version').notNull().default(1),
+    // 正文编辑锁：谁拿着、哪个事件流连接、到什么时候（续约顺延，过期就当没锁）
+    editLockUser: varchar('edit_lock_user', { length: 100 }),
+    editLockName: varchar('edit_lock_name', { length: 100 }),
+    editLockConn: varchar('edit_lock_conn', { length: 36 }),
+    editLockExpires: datetime('edit_lock_expires', { mode: 'date', fsp: 3 }),
     createdAt: now('created_at'),
     updatedAt: now('updated_at'),
   },
   (t) => [index('idx_document_biz').on(t.bizKey)],
+)
+
+/** 批注：不进文档 JSON、不进导出；按引用的原文和第几处定位（原文改了就找不到，界面上提示） */
+export const comment = mysqlTable(
+  'comment',
+  {
+    id: id().primaryKey(),
+    documentId: id('document_id').notNull(),
+    /** 回复时是被回复的那条批注 */
+    parentId: id('parent_id'),
+    quote: varchar('quote', { length: 500 }),
+    occurrence: int('occurrence'),
+    body: varchar('body', { length: 2000 }).notNull(),
+    authorId: varchar('author_id', { length: 100 }).notNull(),
+    authorName: varchar('author_name', { length: 100 }).notNull(),
+    resolved: boolean('resolved').notNull().default(false),
+    createdAt: now('created_at'),
+    updatedAt: now('updated_at'),
+  },
+  (t) => [index('idx_comment_document').on(t.documentId)],
+)
+
+/** 版本历史：编辑模式整份保存、状态变化时存一份快照，版本对比用 */
+export const documentRevision = mysqlTable(
+  'document_revision',
+  {
+    id: id().primaryKey(),
+    documentId: id('document_id').notNull(),
+    version: int('version').notNull(),
+    reason: varchar('reason', { length: 50 }).notNull(),
+    doc: json('doc_json').$type<DocData>().notNull(),
+    values: json('values_json').$type<DocValues>().notNull(),
+    operator: varchar('operator', { length: 100 }).notNull(),
+    operatorName: varchar('operator_name', { length: 100 }),
+    at: now('at'),
+  },
+  (t) => [uniqueIndex('uq_revision').on(t.documentId, t.version)],
 )
 
 export const sealRecord = mysqlTable('seal_record', {
@@ -96,6 +141,8 @@ export const docToken = mysqlTable('doc_token', {
   documentId: id('document_id').notNull(),
   mode: mysqlEnum('mode', ['edit', 'fill', 'seal', 'view']).$type<Mode>().notNull(),
   userId: varchar('user_id', { length: 100 }).notNull(),
+  /** 显示用的名字（在场、批注、修订、编辑锁里显示）；宿主签发时给，不给就显示 userId */
+  userName: varchar('user_name', { length: 100 }),
   // 能不能打印、下载（方案 4.2「按令牌权限显示打印、下载按钮」）；下载在 /export 校验，打印只能在前端拦
   canPrint: boolean('can_print').notNull().default(true),
   canDownload: boolean('can_download').notNull().default(true),
