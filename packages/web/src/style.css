@@ -1417,3 +1417,141 @@
     transition: none !important;
   }
 }
+
+/* 签署（t12）：签名板是居中的面板（sheet），背后压暗；写字区浅灰底，下面一道浅灰线 */
+.oe .sheet-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 40;
+  display: grid;
+  place-items: center;
+  background: rgba(0, 0, 0, 0.2);
+  animation: oe-fade 200ms var(--oe-spring);
+}
+.oe .sheet {
+  display: grid;
+  gap: 12px;
+  padding: 16px;
+  border-radius: 12px;
+  background: var(--oe-bg);
+  box-shadow: var(--oe-shadow-pop);
+  animation: oe-pop 200ms var(--oe-spring);
+}
+.oe .sheet-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+.oe .sheet-title {
+  font-size: 15px;
+  font-weight: 600;
+}
+.oe .sheet-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.oe .sheet-actions .spacer {
+  flex: 1;
+}
+.oe .sign-pad {
+  position: relative;
+  border-radius: 8px;
+  background: var(--oe-fill-1);
+  overflow: hidden;
+}
+.oe .sign-pad canvas {
+  position: absolute;
+  inset: 0;
+  touch-action: none;
+  cursor: crosshair;
+  outline: none;
+}
+.oe .sign-pad-hint {
+  position: absolute;
+  inset: 0;
+  display: grid;
+  place-items: center;
+  font-size: 15px;
+  color: var(--oe-label-3);
+  pointer-events: none;
+}
+.oe .sign-pad-line {
+  position: absolute;
+  left: 24px;
+  right: 24px;
+  bottom: 48px;
+  height: 1px;
+  background: var(--oe-separator);
+  pointer-events: none;
+}
+/* 签署方列表：轮到的那一行主色；自己签好还没确认的签名缩略图 */
+.oe .signers .row.current .row-value {
+  color: var(--oe-accent);
+  font-weight: 600;
+}
+.oe .sign-thumb {
+  height: 24px;
+  max-width: 72px;
+  object-fit: contain;
+}
+.oe .reject-reason,
+.oe .signing-record textarea {
+  width: 100%;
+  padding: 6px 8px;
+  border: 0;
+  border-radius: 8px;
+  background: var(--oe-fill-1);
+  font: inherit;
+  color: inherit;
+  resize: vertical;
+  outline: none;
+}
+.oe .reject-reason:focus {
+  box-shadow: 0 0 0 3px var(--oe-accent-tint);
+}
+/* 签署记录 */
+.oe .signing-record .mono {
+  font-family: ui-monospace, 'SF Mono', Menlo, Consolas, monospace;
+}
+.oe .signing-record .row-meta.bad,
+.oe .verdict.bad {
+  color: var(--oe-accent);
+  font-weight: 600;
+}
+.oe .record-actions {
+  display: flex;
+  gap: 8px;
+  margin-top: 8px;
+}
+.oe .verdict {
+  display: flex;
+  gap: 6px;
+  align-items: flex-start;
+  margin: 8px 0 0;
+  font-size: 12px;
+}
+.oe .verdict svg {
+  flex: none;
+  margin-top: 1px;
+}
+@keyframes oe-fade {
+  from {
+    opacity: 0;
+  }
+}
+/* 签署方名字长（公司全称）时名字截断，状态、时间整个露出来 */
+.oe .signer-name {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.oe .signers .row-value,
+.oe .signing-record .row-value {
+  flex: none;
+}
+.oe .signing-record p.row-meta {
+  margin: 2px 0 0;
+  white-space: normal;
+  overflow-wrap: anywhere;
+}

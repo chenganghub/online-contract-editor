@@ -35,6 +35,9 @@ import { withDictionaries } from './dictionaries'
 import { Hub, sees, type Subscriber } from './realtime'
 import { registerComments } from './comments'
 import { recordRevision, registerRevisions } from './revisions'
+import type { PdfSigner } from './pdf-sign'
+import { checkTokenSigner, noteView, onSealStatus, sealSigner, signedPdfOf } from './signing'
+import { registerSigning, SIGNER_KEY } from './signing-routes'
 
 export { HttpError }
 
@@ -48,12 +51,14 @@ export interface AppDeps {
   hooks?: { afterAuth?: (req: FastifyRequest) => Promise<void> }
   /** 文档事件的分发（多人编辑，08 第 3 节）；不给就在本进程里分发 */
   hub?: Hub
+  /** 签署完成后最终 PDF 的签名接口（t12）；不给就按配置：SIGN_P12_PATH 的证书，没有就用测试证书 */
+  pdfSigner?: PdfSigner
 }
 
 type Tx = Parameters<Parameters<Db['transaction']>[0]>[0]
 /** 令牌能不能打印、下载（宿主签发令牌时给，不给都能） */
 type Actions = { print: boolean; download: boolean }
-type Caller = { kind: 'host'; clientId: string } | { kind: 'token'; token: TokenPayload; perms: Record<string, Permission>; actions: Actions }
+export type Caller = { kind: 'host'; clientId: string } | { kind: 'token'; token: TokenPayload; perms: Record<string, Permission>; actions: Actions }
 
 // ---------- 入参 ----------
 const PERMISSION = z.enum(['editable', 'readonly', 'required', 'hidden'])
@@ -145,7 +150,8 @@ export async function buildApp(deps: AppDeps): Promise<FastifyInstance> {
   const { config, db } = deps
   const hub = deps.hub ?? new Hub()
   // 文档里带印章图片（base64），放宽请求体上限
-  const app = Fastify({ bodyLimit: 20 * 1024 * 1024, logger: false })
+  // trustProxy：在反向代理后面时，证据链里记真实的客户端 IP（config.TRUST_PROXY）
+  const app = Fastify({ bodyLimit: 20 * 1024 * 1024, logger: false, trustProxy: config.TRUST_PROXY })
   // 事件流是长连接：关服务前先关掉，不然一直等
   app.addHook('preClose', async () => hub.closeAll())
 
@@ -325,6 +331,9 @@ export async function buildApp(deps: AppDeps): Promise<FastifyInstance> {
       return c.kind === 'host' ? { mode: null, perms: null } : { mode: c.token.mode, perms: c.perms }
     },
   })
+  // 签署（08 第 5 节，t12）：签署方、签、拒签、证据链、最终文件、报告、验签在 signing*.ts；令牌、盖章、状态、下载这几个接口也要用
+  const signingDeps = { db, config, store: deps.store, renderer: rendererOf, pdfSigner: deps.pdfSigner, operatorOf: (c: Caller) => operatorOf(c), nameOf: (c: Caller) => nameOf(c) }
+  registerSigning(app, { ...signingDeps, hub, callerFor, requireHost, lockToken })
 
   // 建模板：传文档 JSON，或者传 docx（base64，经渲染服务转成文档，返回导入报告）
   app.post('/api/templates', async (req) => {
@@ -418,6 +427,8 @@ export async function buildApp(deps: AppDeps): Promise<FastifyInstance> {
     if (!row) throw new HttpError(404, 'NOT_FOUND', '文档不存在')
     const base = { id, title: row.title, status: row.status, version: row.version, fields: row.fields, pageCount: row.pageCount, seals: await validSeals(db, id) }
     if (caller.kind === 'host') return { ...base, mode: 'edit', actions: { print: true, download: true }, doc: row.doc, values: row.values }
+    // 签署方打开了（签署中）：证据链里记一次「查看」
+    await noteView(signingDeps, req, caller, id)
     // 隐藏字段的值在服务端剔除，不下发
     const safe = stripHidden(row.doc, row.values, row.fields, caller.perms)
     return { ...base, mode: caller.token.mode, permissions: caller.perms, actions: caller.actions, doc: safe.data, values: safe.values }
@@ -726,6 +737,9 @@ export async function buildApp(deps: AppDeps): Promise<FastifyInstance> {
     const [row] = await db.select().from(document).where(eq(document.id, id)).limit(1)
     if (!row) throw new HttpError(404, 'NOT_FOUND', '文档不存在')
     if (q.version !== undefined && q.version !== row.version) throw new HttpError(409, 'VERSION_CONFLICT', `文档当前是第 ${row.version} 版，不是第 ${q.version} 版`)
+    // 签署完成的文档（t12）：PDF 给签好的那份最终文件（原样，验签按文件哈希认）；看不全的令牌照旧按剔除后的出
+    const signed = q.format === 'pdf' && row.status === 'sealed' && !seesStripped(caller, row.fields) ? await signedPdfOf(signingDeps, id, row.version) : null
+    if (signed) return sendFile(reply, signed, 'pdf', row.title, { 'X-Document-Version': row.version, 'X-Signed-File': 'true' })
     const doc = caller.kind === 'token' ? stripHidden(row.doc, row.values, row.fields, caller.perms).data : row.doc
     const expectedPages = seesStripped(caller, row.fields) || !paged(q.format) ? undefined : (row.pageCount ?? undefined)
     const r = await rendererOf().render({ doc, documentId: id, version: row.version, title: row.title, outputs: [q.format], expectedPages })
@@ -919,19 +933,23 @@ export async function buildApp(deps: AppDeps): Promise<FastifyInstance> {
       const at = new Date()
       const operator = operatorOf(caller)
       let op: Op
+      // 设了签署方的文档（t12）：轮到的签署方放自己的章，只能移、删自己的
+      let signerKey: string | null
       if (body.action === 'place') {
+        signerKey = await sealSigner(tx, caller, id, 'place', null)
         const s = body.seal
-        op = { op: 'placeSeal', seal: { id: s.id, dataURL: s.dataURL, pageNo: s.pageNo, x: s.x, y: s.y, width: s.width, height: s.height, sealId: s.sealId, name: s.name } }
+        op = { op: 'placeSeal', seal: { id: s.id, dataURL: s.dataURL, pageNo: s.pageNo, x: s.x, y: s.y, width: s.width, height: s.height, sealId: s.sealId, name: s.name, ...(signerKey ? { signer: signerKey } : {}) } }
       } else {
         const [rec] = await tx.select().from(sealRecord).where(and(eq(sealRecord.id, body.id), eq(sealRecord.documentId, id), eq(sealRecord.status, 'valid'))).limit(1)
         if (!rec) throw new HttpError(404, 'SEAL_NOT_FOUND', `找不到印章 ${body.id}`)
+        signerKey = await sealSigner(tx, caller, id, body.action, rec.signerKey)
         op = body.action === 'move' ? { op: 'moveSeal', id: body.id, pageNo: body.pageNo, x: body.x, y: body.y } : { op: 'removeSeal', id: body.id }
       }
       const r = applyBatch(row.doc, [op], { fields: row.fields })
       if (!r.ok) throw new HttpError(r.code === 'TARGET_NOT_FOUND' ? 404 : 400, r.code, r.error)
       if (body.action === 'place') {
         const s = body.seal
-        await tx.insert(sealRecord).values({ id: s.id, documentId: id, sealId: s.sealId, sealName: s.name, imageHash: sha256(s.dataURL), pageNo: s.pageNo, x: Math.round(s.x), y: Math.round(s.y), width: Math.round(s.width), height: Math.round(s.height), operator, at })
+        await tx.insert(sealRecord).values({ id: s.id, documentId: id, sealId: s.sealId, sealName: s.name, imageHash: sha256(s.dataURL), pageNo: s.pageNo, x: Math.round(s.x), y: Math.round(s.y), width: Math.round(s.width), height: Math.round(s.height), operator, at, signerKey })
       } else if (body.action === 'move') {
         await tx.update(sealRecord).set({ pageNo: body.pageNo, x: Math.round(body.x), y: Math.round(body.y), operator, at }).where(eq(sealRecord.id, body.id))
       } else await tx.update(sealRecord).set({ status: 'void', operator, at }).where(eq(sealRecord.id, body.id))
@@ -959,6 +977,7 @@ export async function buildApp(deps: AppDeps): Promise<FastifyInstance> {
       const at = new Date()
       const operator = operatorOf(caller)
       let doc = row.doc
+      let values = row.values
       let voided = 0
       if (body.action === 'reject') {
         // 驳回：已盖的章全部作废，并从文档里移除
@@ -969,14 +988,16 @@ export async function buildApp(deps: AppDeps): Promise<FastifyInstance> {
         await tx.update(sealRecord).set({ status: 'void', operator, at }).where(and(eq(sealRecord.documentId, id), eq(sealRecord.status, 'valid')))
         voided = seals.length
       }
+      // 设了签署方的文档（t12）：开始签署、撤回、作废记证据，撤回时清掉签名和签署日期；不能直接提交
+      ;({ doc, values } = await onSealStatus(signingDeps, tx, req, caller, { row, action: body.action, reason: body.reason, doc, values, at }))
       const status = TO[body.action]
       const version = row.version + 1
       const lockedAt = status === 'sealing' || status === 'sealed' ? (row.lockedAt ?? at) : status === 'filling' ? null : row.lockedAt
       // 离开填写中（开始盖章、作废）正文就不能改了：编辑锁一起放掉
       const unlock = status !== 'filling' ? clearLock : {}
-      await tx.update(document).set({ status, doc, version, lockedAt, ...unlock, updatedAt: at }).where(eq(document.id, id))
+      await tx.update(document).set({ status, doc, values, version, lockedAt, ...unlock, updatedAt: at }).where(eq(document.id, id))
       await tx.insert(operationLog).values({ id: newId(), documentId: id, ops: body, result: { ok: true, from: row.status, to: status, version, voided }, operator, at })
-      await recordRevision(tx, { documentId: id, version, reason: body.action, doc, values: row.values, operator, operatorName: nameOf(caller) })
+      await recordRevision(tx, { documentId: id, version, reason: body.action, doc, values, operator, operatorName: nameOf(caller) })
       return { id, version, status, voided }
     })
     // 状态变了（开始盖章、提交、驳回、作废）：打开着的人都要知道，编辑、填写的要变只读；编辑锁已经放掉
@@ -998,21 +1019,24 @@ export async function buildApp(deps: AppDeps): Promise<FastifyInstance> {
         // 能不能打印、下载，不给都能
         actions: z.object({ print: z.boolean().optional(), download: z.boolean().optional() }).optional(),
         ttlSeconds: z.number().int().min(1).max(86400).optional(),
+        // 签署令牌（t12）：绑定签署方，只有盖章模式能绑；userId 要是签署方绑定的那个人
+        signer: SIGNER_KEY.optional(),
       }),
       req.body,
     )
     const [d] = await db.select({ id: document.id }).from(document).where(eq(document.id, body.documentId)).limit(1)
     if (!d) throw new HttpError(404, 'NOT_FOUND', '文档不存在')
+    if (body.signer) await checkTokenSigner(db, body.documentId, body.mode, body.userId, body.signer)
     const tid = newId()
     const expiresAt = new Date(Date.now() + (body.ttlSeconds ?? config.TOKEN_TTL_SECONDS) * 1000)
     const canPrint = body.actions?.print ?? true
     const canDownload = body.actions?.download ?? true
     await db.transaction(async (tx) => {
-      await tx.insert(docToken).values({ id: tid, documentId: body.documentId, mode: body.mode, userId: body.userId, userName: body.userName ?? null, canPrint, canDownload, expiresAt })
+      await tx.insert(docToken).values({ id: tid, documentId: body.documentId, mode: body.mode, userId: body.userId, userName: body.userName ?? null, signerKey: body.signer ?? null, canPrint, canDownload, expiresAt })
       const rows = Object.entries(body.permissions).map(([fieldKey, permission]) => ({ tokenId: tid, fieldKey, permission }))
       if (rows.length) await tx.insert(tokenPermission).values(rows)
     })
-    const token = signToken(config.TOKEN_SECRET, { tid, did: body.documentId, mode: body.mode, uid: body.userId, ...(body.userName ? { un: body.userName } : {}), exp: expiresAt.getTime() })
+    const token = signToken(config.TOKEN_SECRET, { tid, did: body.documentId, mode: body.mode, uid: body.userId, ...(body.userName ? { un: body.userName } : {}), ...(body.signer ? { sg: body.signer } : {}), exp: expiresAt.getTime() })
     return { id: tid, token, expiresAt, actions: { print: canPrint, download: canDownload } }
   })
 

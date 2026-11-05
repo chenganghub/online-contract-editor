@@ -58,10 +58,93 @@ export const document = mysqlTable(
     editLockName: varchar('edit_lock_name', { length: 100 }),
     editLockConn: varchar('edit_lock_conn', { length: 36 }),
     editLockExpires: datetime('edit_lock_expires', { mode: 'date', fsp: 3 }),
+    /** 签署截止时间（t12）：过了就不能开始签署、不能签 */
+    signDeadline: datetime('sign_deadline', { mode: 'date', fsp: 3 }),
     createdAt: now('created_at'),
     updatedAt: now('updated_at'),
   },
   (t) => [index('idx_document_biz').on(t.bizKey)],
+)
+
+/**
+ * 签署方（docs/设计/08 第 5 节，t12）：宿主设，按 order_no 从小到大签，一样的同时签。
+ * key 对应签名区、签署日期字段的 signer（a 甲方、b 乙方……）；签署令牌的 userId 要和 user_id 一样
+ */
+export const signer = mysqlTable(
+  'signer',
+  {
+    id: id().primaryKey(),
+    documentId: id('document_id').notNull(),
+    key: varchar('signer_key', { length: 32 }).notNull(),
+    name: varchar('name', { length: 100 }).notNull(),
+    kind: mysqlEnum('kind', ['person', 'org']).notNull().default('person'),
+    userId: varchar('user_id', { length: 100 }).notNull(),
+    orderNo: int('order_no').notNull(),
+    /** 签之前要不要意愿认证（宿主登记的凭据，见 sign_intent） */
+    intentRequired: boolean('intent_required').notNull().default(true),
+    status: mysqlEnum('status', ['waiting', 'signed', 'rejected']).notNull().default('waiting'),
+    intentMethod: varchar('intent_method', { length: 20 }),
+    intentProof: varchar('intent_proof', { length: 200 }),
+    signedAt: datetime('signed_at', { mode: 'date', fsp: 3 }),
+    rejectReason: varchar('reject_reason', { length: 500 }),
+  },
+  (t) => [uniqueIndex('uq_signer').on(t.documentId, t.key)],
+)
+
+/** 意愿认证凭据：宿主做完短信验证码、人脸等之后用 API Key 登记，签署时用一次，10 分钟内有效 */
+export const signIntent = mysqlTable('sign_intent', {
+  id: id().primaryKey(),
+  documentId: id('document_id').notNull(),
+  signerKey: varchar('signer_key', { length: 32 }).notNull(),
+  method: mysqlEnum('method', ['sms', 'face', 'password', 'cert', 'other']).notNull(),
+  /** 宿主那边的凭据号（短信验证记录、人脸核验流水号），原样记进证据 */
+  proof: varchar('proof', { length: 200 }).notNull(),
+  expiresAt: datetime('expires_at', { mode: 'date', fsp: 3 }).notNull(),
+  usedAt: datetime('used_at', { mode: 'date', fsp: 3 }),
+  createdAt: now('created_at'),
+})
+
+/**
+ * 证据链：签署过程每一步一条（谁、什么时候、IP、设备、当时的文档哈希、细节）。
+ * hash = SHA-256(上一条的 hash + 这一条的内容)，第一条的上一条是 64 个 0；改了、删了哪一条，往后的都对不上
+ */
+export const signEvidence = mysqlTable(
+  'sign_evidence',
+  {
+    id: id().primaryKey(),
+    documentId: id('document_id').notNull(),
+    seq: int('seq').notNull(),
+    action: varchar('action', { length: 20 }).notNull(),
+    signerKey: varchar('signer_key', { length: 32 }),
+    operator: varchar('operator', { length: 100 }).notNull(),
+    operatorName: varchar('operator_name', { length: 100 }).notNull(),
+    ip: varchar('ip', { length: 64 }),
+    userAgent: varchar('user_agent', { length: 300 }),
+    docHash: char('doc_hash', { length: 64 }).notNull(),
+    detail: json('detail_json').$type<Record<string, unknown>>().notNull(),
+    prevHash: char('prev_hash', { length: 64 }).notNull(),
+    hash: char('hash', { length: 64 }).notNull(),
+    at: datetime('at', { mode: 'date', fsp: 3 }).notNull(),
+  },
+  (t) => [uniqueIndex('uq_evidence').on(t.documentId, t.seq)],
+)
+
+/** 签署完成后出的最终 PDF（带数字签名），文件按 sha256 存在文件存储里；验签时按哈希认出是哪份合同 */
+export const signedFile = mysqlTable(
+  'signed_file',
+  {
+    id: id().primaryKey(),
+    documentId: id('document_id').notNull(),
+    version: int('version').notNull(),
+    sha256: char('sha256', { length: 64 }).notNull(),
+    size: bigint('size', { mode: 'number' }).notNull(),
+    pageCount: int('page_count').notNull(),
+    certSubject: varchar('cert_subject', { length: 300 }).notNull(),
+    certSerial: varchar('cert_serial', { length: 100 }).notNull(),
+    testCert: boolean('test_cert').notNull(),
+    at: now('at'),
+  },
+  (t) => [uniqueIndex('uq_signed_file').on(t.documentId, t.version), index('idx_signed_file_sha').on(t.sha256)],
 )
 
 /** 批注：不进文档 JSON、不进导出；按引用的原文和第几处定位（原文改了就找不到，界面上提示） */
@@ -116,6 +199,8 @@ export const sealRecord = mysqlTable('seal_record', {
   operator: varchar('operator', { length: 100 }).notNull(),
   at: now('at'),
   status: mysqlEnum('status', ['valid', 'void']).notNull().default('valid'),
+  /** 设了签署方的文档：哪个签署方盖的（只有他能移、删，签完就不能动了） */
+  signerKey: varchar('signer_key', { length: 32 }),
 })
 
 export const operationLog = mysqlTable('operation_log', {
@@ -143,6 +228,8 @@ export const docToken = mysqlTable('doc_token', {
   userId: varchar('user_id', { length: 100 }).notNull(),
   /** 显示用的名字（在场、批注、修订、编辑锁里显示）；宿主签发时给，不给就显示 userId */
   userName: varchar('user_name', { length: 100 }),
+  /** 签署令牌绑定的签署方（signer.signer_key，t12）；只有盖章模式的令牌能绑 */
+  signerKey: varchar('signer_key', { length: 32 }),
   // 能不能打印、下载（方案 4.2「按令牌权限显示打印、下载按钮」）；下载在 /export 校验，打印只能在前端拦
   canPrint: boolean('can_print').notNull().default(true),
   canDownload: boolean('can_download').notNull().default(true),

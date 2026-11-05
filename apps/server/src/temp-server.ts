@@ -30,7 +30,8 @@ export async function startTempServer(renderer?: RendererClient) {
     const config = loadConfig({ DATABASE_URL: url, STORAGE_DIR: storage, TOKEN_SECRET: crypto.randomBytes(32).toString('hex') })
     const app = await buildApp({ config, db, store: localFileStore(storage), renderer })
     cleanup.push(() => app.close())
-    return { app, apiKey, stop }
+    // db：本机验证脚本直接改库用（比如改一条证据，看证据链能不能发现）
+    return { app, apiKey, db, stop }
   } catch (e) {
     await stop()
     throw e

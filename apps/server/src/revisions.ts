@@ -11,8 +11,8 @@ import { document, documentRevision } from './db/schema'
 import { HttpError } from './errors'
 
 type Tx = Parameters<Parameters<Db['transaction']>[0]>[0]
-/** create：建文档；edit：编辑；start、submit、reject、void：开始盖章、提交盖章、驳回、作废 */
-export type RevisionReason = 'create' | 'edit' | 'start' | 'submit' | 'reject' | 'void'
+/** create：建文档；edit：编辑；start、submit、reject、void：开始盖章、提交盖章、驳回、作废；sign：一个签署方签了（t12） */
+export type RevisionReason = 'create' | 'edit' | 'start' | 'submit' | 'reject' | 'void' | 'sign'
 /** 同一个人两次保存隔多久以内合成一版 */
 const MERGE_MS = 10 * 60_000
 /** 列表最多给多少版（新的在前） */

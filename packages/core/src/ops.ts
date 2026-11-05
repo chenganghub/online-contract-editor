@@ -177,7 +177,7 @@ function placeSeal(doc: Doc, s: SealPlacement): string {
     height: s.height,
     imgDisplay: 'float-top',
     imgFloatPosition: { x: s.x, y: s.y, pageNo: s.pageNo },
-    ...(s.sealId ? { extension: { seal: { sealId: s.sealId, name: s.name ?? '' } } } : {}),
+    ...(s.sealId ? { extension: { seal: { sealId: s.sealId, name: s.name ?? '', ...(s.signer ? { signer: s.signer } : {}) } } } : {}),
   })
   return s.id
 }

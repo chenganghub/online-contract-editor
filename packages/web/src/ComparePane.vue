@@ -23,7 +23,7 @@ const props = defineProps<{
 }>()
 const emit = defineEmits<{ close: [] }>()
 
-const REASONS: Record<RevisionItem['reason'], string> = { create: '创建', edit: '编辑', start: '开始盖章', submit: '提交盖章', reject: '驳回', void: '作废' }
+const REASONS: Record<RevisionItem['reason'], string> = { create: '创建', edit: '编辑', start: '开始盖章', submit: '提交盖章', reject: '驳回', void: '作废', sign: '签署' }
 const label = (v: RevisionItem) => [shortTime(v.at), v.operatorName, REASONS[v.reason] ?? v.reason].filter(Boolean).join(' ')
 const from = ref<Side>(props.from)
 const to = ref<Side>(props.to)

@@ -56,7 +56,7 @@ beforeAll(async () => {
   database = db
   await db.insert(apiClient).values({ id: crypto.randomUUID(), name: '测试宿主', keyHash: hashKey(KEY) })
   const storage = fs.mkdtempSync(path.join(os.tmpdir(), 'oe-storage-'))
-  const config = { DATABASE_URL: 'mysql://x', PORT: 0, HOST: '127.0.0.1', STORAGE_DIR: storage, TOKEN_SECRET: 'x'.repeat(32), TOKEN_TTL_SECONDS: 1800, RENDERER_URL: 'http://127.0.0.1:1', RENDER_TIMEOUT_MS: 1000 }
+  const config = { DATABASE_URL: 'mysql://x', PORT: 0, HOST: '127.0.0.1', STORAGE_DIR: storage, TOKEN_SECRET: 'x'.repeat(32), TOKEN_TTL_SECONDS: 1800, RENDERER_URL: 'http://127.0.0.1:1', RENDER_TIMEOUT_MS: 1000, SIGN_P12_PASSWORD: '', SIGN_TIMEZONE: 'Asia/Shanghai', TRUST_PROXY: false }
   app = await buildApp({ config, db, store: localFileStore(storage), hooks, renderer: fakeRenderer })
   stop = async () => {
     await app.close()

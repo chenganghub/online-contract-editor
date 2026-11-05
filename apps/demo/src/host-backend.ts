@@ -15,6 +15,8 @@ export interface TokenRequest {
   actions?: DocActions
   /** 演示用：地址上 ?user= 模拟的用户（真实宿主按自己的登录态定是谁） */
   user?: { id: string; name: string }
+  /** 签署令牌绑定的签署方（t12，盖章模式）：服务端核对令牌的用户就是这个签署方绑定的人 */
+  signer?: string
 }
 
 export const DEMO_USER = 'demo-user'
@@ -53,8 +55,50 @@ export async function issueToken(api: ServerApi, authorization: string | undefin
   } else if (mode !== 'view' && status !== NEEDS[mode]) mode = 'view'
   // 演示用户：名字 1～20 个字，不合规的按默认用户
   const user = typeof req.user?.name === 'string' && /^[\p{L}\p{N} _-]{1,20}$/u.test(req.user.name) ? { userId: `demo-${req.user.name}`, userName: req.user.name } : { userId: DEMO_USER }
-  const t = await api('POST', '/api/tokens', { documentId: req.documentId, mode, ...user, permissions: req.permissions ?? {}, actions: req.actions })
+  const signer = mode === 'seal' && typeof req.signer === 'string' && /^[a-z][a-z0-9_-]{0,31}$/.test(req.signer) ? { signer: req.signer } : {}
+  const t = await api('POST', '/api/tokens', { documentId: req.documentId, mode, ...user, permissions: req.permissions ?? {}, actions: req.actions, ...signer })
   return t.status === 200 ? { status: 200, json: { token: (t.json as { token: string }).token } } : t
+}
+
+// ---------- 签署（t12）----------
+/** 演示的短信验证码：真实宿主发真的短信、做人脸，核对通过后再登记凭据 */
+export const DEMO_SMS_CODE = '123456'
+const unauthorized = { status: 401, json: { code: 'UNAUTHORIZED', message: '没有登录' } }
+/** POST /host/intent：核对验证码，通过后用 API Key 向服务端登记意愿认证凭据（POST …/intents），返回凭据 id */
+export async function registerIntent(api: ServerApi, authorization: string | undefined, req: { documentId: string; signer: string; code: string }): Promise<{ status: number; json: unknown }> {
+  if (authorization !== HOST_TOKEN) return unauthorized
+  if (typeof req?.documentId !== 'string' || typeof req.signer !== 'string') return { status: 400, json: { code: 'BAD_REQUEST', message: '要给 documentId 和 signer' } }
+  if (req.code !== DEMO_SMS_CODE) return { status: 403, json: { code: 'BAD_CODE', message: '验证码不对' } }
+  const r = await api('POST', `/api/documents/${encodeURIComponent(req.documentId)}/intents`, { signer: req.signer, method: 'sms', proof: `demo-sms-${crypto.randomUUID()}` })
+  return r.status === 200 ? { status: 200, json: { intentId: (r.json as { id: string }).id } } : r
+}
+/** POST /host/verify：把 PDF（base64）转给服务端验签 */
+export async function verifyFile(api: ServerApi, authorization: string | undefined, req: { pdf: string }): Promise<{ status: number; json: unknown }> {
+  if (authorization !== HOST_TOKEN) return unauthorized
+  if (typeof req?.pdf !== 'string') return { status: 400, json: { code: 'BAD_REQUEST', message: '要给 pdf' } }
+  return api('POST', '/api/verify', { pdf: req.pdf })
+}
+/**
+ * POST /host/sign-demo：建一份两方按顺序签的演示合同（保密协议；文档由页面按范本拼好交过来，签名区的占位图要在浏览器里画），
+ * 设签署方（甲方张三、乙方李四，都是企业，都要意愿认证），开始签署，返回文档 id
+ */
+export async function createSignDemo(api: ServerApi, authorization: string | undefined, req: { doc: unknown; fields: unknown; values?: Record<string, unknown>; title?: string }): Promise<{ status: number; json: unknown }> {
+  if (authorization !== HOST_TOKEN) return unauthorized
+  const t = await api('POST', '/api/templates', { name: req?.title ?? '保密协议', doc: req?.doc, fields: req?.fields })
+  if (t.status !== 200) return t
+  const d = await api('POST', '/api/documents', { templateId: (t.json as { id: string }).id, versionNo: 1, values: req.values ?? {} })
+  if (d.status !== 200) return d
+  const id = (d.json as { id: string }).id
+  const values = req.values ?? {}
+  const s = await api('PUT', `/api/documents/${id}/signers`, {
+    signers: [
+      { key: 'a', name: String(values.partyA ?? '甲方'), kind: 'org', userId: 'demo-张三', order: 1 },
+      { key: 'b', name: String(values.partyB ?? '乙方'), kind: 'org', userId: 'demo-李四', order: 2 },
+    ],
+  })
+  if (s.status !== 200) return s
+  const start = await api('POST', `/api/documents/${id}/seal-status`, { action: 'start', version: 1 })
+  return start.status === 200 ? { status: 200, json: { id } } : start
 }
 
 /** 演示用模板设计入口；真实宿主在这里检查财务的模板设计权限。 */

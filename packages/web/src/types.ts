@@ -160,6 +160,8 @@ export type CollabEvent =
   | { type: 'lock-request'; from: CollabBy & { conn: string } }
   | { type: 'status'; status: string; version: number; by: CollabBy }
   | { type: 'comments'; by: CollabBy; conn?: string }
+  /** 有签署方签了、拒签了（签名、签署日期写进了文档） */
+  | { type: 'signing'; version: number; status: string; signer: string; action: 'sign' | 'reject'; by: CollabBy }
 
 /**
  * 宿主函数：接上文档的事件流（多人编辑）。不给就没有多人编辑的功能。
@@ -190,8 +192,8 @@ export interface CollabConnector {
 export interface RevisionItem {
   /** 文档的版本号（存这一版时的） */
   version: number
-  /** create 建文档；edit 编辑；start、submit、reject、void：开始盖章、提交盖章、驳回、作废 */
-  reason: 'create' | 'edit' | 'start' | 'submit' | 'reject' | 'void'
+  /** create 建文档；edit 编辑；start、submit、reject、void：开始盖章、提交盖章、驳回、作废；sign：一个签署方签了（t12） */
+  reason: 'create' | 'edit' | 'start' | 'submit' | 'reject' | 'void' | 'sign'
   operatorName: string | null
   at: string
 }
@@ -251,6 +253,8 @@ export interface EditorOptions {
   confirmLeave?: boolean
   /** 多人编辑：文档的事件流（在场、别人保存的字段和正文、编辑锁）；不传就是一个人用 */
   collab?: CollabConnector
+  /** 签署：签署方和进度、签名板、确认签署、拒签、签署记录、验签；不传就是原来的盖章 */
+  signing?: SigningApi
 }
 
 /** 导入 Word 的结果：服务端（渲染服务 /convert）转好的文档和导入报告 */
@@ -284,6 +288,92 @@ export interface EditorEvents {
 /** 打开文件、下载的格式（docs/设计/07 第 2 节） */
 export type { ExportFormat, ImportFormat } from './files'
 
+/** 一个签署方（服务端 GET /api/documents/{id}/signers 的 signers，docs/设计/08 第 5 节） */
+export interface SignerItem {
+  /** 角色 key，对应签名区、签署日期字段的 signer（a 甲方、b 乙方……） */
+  key: string
+  /** 角色名：甲方、乙方…… */
+  role: string
+  name: string
+  kind: 'person' | 'org'
+  /** 签署顺序，小的先签，一样的同时签 */
+  order: number
+  /** 签之前要不要意愿认证 */
+  intentRequired: boolean
+  status: 'waiting' | 'signed' | 'rejected'
+  signedAt: string | null
+  /** 意愿认证方式：sms、face、password、cert、other */
+  intentMethod: string | null
+  rejectReason: string | null
+}
+/** 签署进度（GET …/signers）：turn 是现在轮到的签署方，me 是这个令牌绑定的签署方 */
+export interface SigningState {
+  status: string
+  deadline: string | null
+  signers: SignerItem[]
+  turn: string[]
+  me: string | null
+}
+/** 证据链的一条（签署报告里） */
+export interface EvidenceItem {
+  seq: number
+  /** signers、start、view、intent、sign、reject、revoke、void、complete */
+  action: string
+  signer: string | null
+  operatorName: string
+  ip: string | null
+  userAgent: string | null
+  docHash: string
+  detail: Record<string, unknown>
+  at: string
+  hash: string
+}
+/** 签署报告（GET …/signing-report） */
+export interface SigningReport {
+  document: { id: string; title: string; status: string; version: number }
+  signers: SignerItem[]
+  evidence: EvidenceItem[]
+  /** 证据链重算的结果：broken 是从第几条起对不上 */
+  chain: { valid: boolean; broken: number | null; count: number; head: string | null }
+  /** 最终文件（带数字签名的 PDF）；还没签完是 null */
+  file: { version: number; sha256: string; size: number; pageCount: number; at: string; cert: { subject: string; serial: string; test: boolean } } | null
+}
+/** 验签结果（服务端 POST /api/verify） */
+export interface VerifyResult {
+  sha256: string
+  signatures: { valid: boolean; coversWholeFile: boolean; signedAt: string | null; reason: string | null; testCert: boolean; cert: { subject: string; issuer: string; serial: string } | null; error?: string }[]
+  /** 文件是这个系统出的最终文件时：哪份合同、哪一版、谁签的 */
+  known: { documentId: string; title: string | null; version: number; signedAt: string; testCert: boolean; signers: { role: string; name: string; status: string; signedAt: string | null }[] } | null
+}
+/** 签完、拒签后服务端给的文档 */
+export interface SigningResult {
+  version: number
+  status: string
+  doc: DocData
+  values: DocValues
+}
+/**
+ * 签署（docs/设计/08 第 5 节）：宿主把服务端的签署接口接上（令牌放请求头）。盖章模式给了 sign，检查器里出签署进度、签名板、
+ * 确认签署和拒签；给了 report，工具栏有「签署记录」（签署方、证据链、最终文件、验签）
+ */
+export interface SigningApi {
+  /** 签署方和进度（GET …/signers） */
+  state(): Promise<SigningState>
+  /**
+   * 意愿认证：宿主自己做（短信验证码、人脸、签署密码……），做完由宿主后端用 API Key 登记凭据（POST …/intents），
+   * 返回凭据 id；用户取消返回 null。签署方不要求意愿认证时不调
+   */
+  confirmIntent?(signer: SignerItem): Promise<string | null>
+  /** 确认签署（POST …/sign）：每个自己的签名区一张 PNG */
+  sign?(req: { signatures: Record<string, string>; intent?: string }): Promise<SigningResult>
+  /** 拒签（POST …/sign，action reject） */
+  reject?(reason: string): Promise<SigningResult>
+  report?(): Promise<SigningReport>
+  /** 下载签好的 PDF（GET …/signed-file）、签署报告 PDF（GET …/signing-report?format=pdf） */
+  download?(what: 'signed' | 'report'): Promise<void>
+  /** 核对一份 PDF（宿主后端转给 POST /api/verify） */
+  verify?(file: File): Promise<VerifyResult>
+}
 /** 盖章操作，字段和服务端 POST /documents/{id}/seals 的入参一致（版本号由宿主加） */
 export type SealOp =
   | { action: 'place'; seal: { id: string; sealId: string; name: string; dataURL: string; pageNo: number; x: number; y: number; width: number; height: number } }

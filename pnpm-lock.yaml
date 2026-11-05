@@ -115,6 +115,18 @@ importers:
       '@oe/core':
         specifier: workspace:*
         version: link:../../packages/core
+      '@signpdf/placeholder-pdf-lib':
+        specifier: 4.0.0
+        version: 4.0.0(pdf-lib@1.17.1)
+      '@signpdf/signer-p12':
+        specifier: 4.0.0
+        version: 4.0.0(node-forge@1.4.3)
+      '@signpdf/signpdf':
+        specifier: 4.0.0
+        version: 4.0.0
+      '@signpdf/utils':
+        specifier: 4.0.0
+        version: 4.0.0
       drizzle-orm:
         specifier: ^0.45.4
         version: 0.45.4(mysql2@3.24.6(@types/node@26.6.6))
@@ -124,10 +136,19 @@ importers:
       mysql2:
         specifier: ^3.24.6
         version: 3.24.6(@types/node@26.6.6)
+      node-forge:
+        specifier: ^1.4.3
+        version: 1.4.3
+      pdf-lib:
+        specifier: ^1.17.1
+        version: 1.17.1
       zod:
         specifier: ^4.6.7
         version: 4.6.7
     devDependencies:
+      '@types/node-forge':
+        specifier: ^1.3.14
+        version: 1.3.14
       drizzle-kit:
         specifier: ^0.31.11
         version: 0.31.11
@@ -1011,6 +1032,26 @@ packages:
     cpu: [x64]
     os: [win32]
 
+  '@signpdf/placeholder-pdf-lib@4.0.0':
+    resolution: {integrity: sha512-5EGTe4RVulLaxDi1ta2v42+M3rhy55LmgpSZUWTTspUpXAfhsjyhE+dUINXz6wYKtjDoY+Qz2yR9kD2xOPSTCw==}
+    engines: {node: '>=22', yarn: '>=1.22.18'}
+    peerDependencies:
+      pdf-lib: ^1.17.1
+
+  '@signpdf/signer-p12@4.0.0':
+    resolution: {integrity: sha512-Gv3x2t8O/53diT8fDeNcZ2/6YJjqN/BSGDi3zF94Jc/2i5v0dxd5aSuz+GFDezYde86JglRArsDPkIXgIQ/+cg==}
+    engines: {node: '>=22', yarn: '>=1.22.18'}
+    peerDependencies:
+      node-forge: ^1.3.3
+
+  '@signpdf/signpdf@4.0.0':
+    resolution: {integrity: sha512-jvNFqZ0zEJX6OxRoLrgjl31DOrnG9k7QbYvGyvwTl542WGZUx1iKqGVqqXF9VsqTrUi5iz+JIwYL26ZPMwl6Xg==}
+    engines: {node: '>=22'}
+
+  '@signpdf/utils@4.0.0':
+    resolution: {integrity: sha512-4uiNqyHTVnXGYK+zhwLKrsykX3d4f0mlbzykyI0BGiNVIZssHo61KmwWzUEbAcE//TpheUd2xD7yA8mjxIpaZg==}
+    engines: {node: '>=22', yarn: '>=1.22.18'}
+
   '@types/chai@5.2.3':
     resolution: {integrity: sha512-Mw558oeA9fFbv65/y4mHtXDs9bPnFMZAL/jxdPFUpOHHIXX91mcgEHbS5Lahr+pwZFR8A7GQleRWeI6cGFC2UA==}
 
@@ -1025,6 +1066,9 @@ packages:
 
   '@types/json-schema@7.0.15':
     resolution: {integrity: sha512-5+fP8P8MFNC+AyZCDxrB2pkZFPGzqQWUzpSeuuVLvm8VMcorNYavBqoFcxK8bQz4Qsbn4oUEEem4wDLfcysGHA==}
+
+  '@types/node-forge@1.3.14':
+    resolution: {integrity: sha512-mhVF2BnD4BO+jtOp7z1CdzaK4mbuK0LLQYAvdOLqHTavxFNq4zA1EmYkpnFjP8HOUzedfQkRnp0E2ulSAYSzAw==}
 
   '@types/node@20.19.43':
     resolution: {integrity: sha512-6oYBAi5ikg4Pl+kGsoYtawUMBT2zZMCvPNF7pVLnHZfd1zf38DRiWn/gT01RYCdUqkv7Fhr+C9ot4/tb+2sVvA==}
@@ -1762,6 +1806,10 @@ packages:
 
   natural-compare@1.4.0:
     resolution: {integrity: sha512-OWND8ei3VtNC9h7V60qff3SVobHr996CTwgxubgyQYEpg290h9J0buyECNNJexkFm5sOajh5G116RYA1c8ZMSw==}
+
+  node-forge@1.4.3:
+    resolution: {integrity: sha512-P6wzfh6t70avmV8FrVEAd/36sOPJQ+hkaJVX1Laap9J/77m7M0eyozDvc8SwnDf4P7MP94gwbAAo0rg3YVXT+g==}
+    engines: {node: '>= 6.13.0'}
 
   node-int64@0.4.0:
     resolution: {integrity: sha512-O5lz91xSOeoXP6DulyHfllpq+Eg00MWitZIbtPfoSEvqIHdl5gfcY6hYzDWnj0qD5tz52PI08u9qUvSVeUBeHw==}
@@ -2718,6 +2766,22 @@ snapshots:
   '@rollup/rollup-win32-x64-msvc@4.67.2':
     optional: true
 
+  '@signpdf/placeholder-pdf-lib@4.0.0(pdf-lib@1.17.1)':
+    dependencies:
+      '@signpdf/utils': 4.0.0
+      pdf-lib: 1.17.1
+
+  '@signpdf/signer-p12@4.0.0(node-forge@1.4.3)':
+    dependencies:
+      '@signpdf/utils': 4.0.0
+      node-forge: 1.4.3
+
+  '@signpdf/signpdf@4.0.0':
+    dependencies:
+      '@signpdf/utils': 4.0.0
+
+  '@signpdf/utils@4.0.0': {}
+
   '@types/chai@5.2.3':
     dependencies:
       '@types/deep-eql': 4.0.2
@@ -2730,6 +2794,10 @@ snapshots:
   '@types/estree@1.0.10': {}
 
   '@types/json-schema@7.0.15': {}
+
+  '@types/node-forge@1.3.14':
+    dependencies:
+      '@types/node': 24.19.2
 
   '@types/node@20.19.43':
     dependencies:
@@ -3512,6 +3580,8 @@ snapshots:
   nanoid@5.1.16: {}
 
   natural-compare@1.4.0: {}
+
+  node-forge@1.4.3: {}
 
   node-int64@0.4.0: {}
 

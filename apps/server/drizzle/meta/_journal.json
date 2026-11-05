@@ -43,6 +43,13 @@
       "when": 1793837501360,
       "tag": "0005_collab",
       "breakpoints": true
+    },
+    {
+      "idx": 6,
+      "version": "5",
+      "when": 1793865495362,
+      "tag": "0006_sign",
+      "breakpoints": true
     }
   ]
 }

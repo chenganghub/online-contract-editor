@@ -12,6 +12,8 @@ export interface TokenPayload {
   uid: string
   /** 显示用的名字（在场、批注、编辑锁里显示），不给就显示 uid */
   un?: string
+  /** 签署令牌绑定的签署方 key（t12，只有盖章模式有）：只能以这个签署方的身份盖章、签、拒签 */
+  sg?: string
   /** 过期时间，毫秒时间戳 */
   exp: number
 }

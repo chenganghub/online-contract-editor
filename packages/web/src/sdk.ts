@@ -79,6 +79,7 @@ export async function createEditor(el: HTMLElement, options: EditorOptions): Pro
         importDocx: options.importDocx,
         confirmLeave: options.confirmLeave,
         collab: options.collab,
+        signing: options.signing,
         onReady: () => {
           ready()
           fire('ready')()

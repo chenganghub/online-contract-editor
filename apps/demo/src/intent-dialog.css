@@ -1,0 +1,69 @@
+/* 演示宿主的意愿认证框（模拟短信验证码）：和编辑器同一套样子，主色加灰 */
+.intent-dialog {
+  width: 360px;
+  padding: 20px;
+  border: 0;
+  border-radius: 12px;
+  background: #fff;
+  color: #1d1d1f;
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.12), 0 0 0 0.5px rgba(0, 0, 0, 0.08);
+  font: 13px/1.5 -apple-system, BlinkMacSystemFont, 'PingFang SC', 'Microsoft YaHei', sans-serif;
+}
+.intent-dialog::backdrop {
+  background: rgba(0, 0, 0, 0.2);
+}
+.intent-dialog h2 {
+  margin: 0 0 8px;
+  font-size: 15px;
+  font-weight: 600;
+}
+.intent-dialog p {
+  margin: 0 0 12px;
+  color: rgba(60, 60, 67, 0.6);
+}
+.intent-dialog input {
+  width: 100%;
+  height: 28px;
+  padding: 0 8px;
+  border: 0;
+  border-radius: 8px;
+  background: rgba(120, 120, 128, 0.08);
+  font: inherit;
+  letter-spacing: 0.2em;
+  outline: none;
+  box-sizing: border-box;
+}
+.intent-dialog input:focus {
+  box-shadow: 0 0 0 3px rgba(0, 122, 255, 0.12);
+}
+.intent-dialog .intent-error {
+  min-height: 18px;
+  margin: 6px 0 4px;
+  color: #007aff;
+  font-weight: 600;
+}
+.intent-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+}
+.intent-actions button {
+  height: 28px;
+  padding: 0 12px;
+  border: 0;
+  border-radius: 8px;
+  font: inherit;
+  cursor: pointer;
+}
+.intent-cancel {
+  background: rgba(0, 122, 255, 0.12);
+  color: #007aff;
+}
+.intent-ok {
+  background: #007aff;
+  color: #fff;
+}
+.intent-ok:disabled {
+  opacity: 0.4;
+  cursor: default;
+}

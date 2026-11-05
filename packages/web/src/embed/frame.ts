@@ -1,8 +1,8 @@
 // iframe 里的嵌入页：等父页面发来 init 再建编辑器；父页面调方法、编辑器发事件、编辑器要用宿主函数都走 postMessage。
 // 安全：只认地址上 origin 参数列出的来源（可写多个，逗号分隔）；第一次 init 之后只认那一个来源；回消息指定目标来源，不用 *
 import { createEditor, type EditorHandle } from '../sdk'
-import type { EditorEvents, EditorOptions } from '../types'
-import { EDITOR_METHODS, PROTOCOL, isMessage, transferable, type FrameMessageBody, type HostFunctionName, type HostMessage } from './protocol'
+import type { EditorEvents, EditorOptions, SigningApi } from '../types'
+import { EDITOR_METHODS, PROTOCOL, SIGNING_FUNCTIONS, isMessage, transferable, type FrameMessageBody, type HostFunctionName, type HostMessage } from './protocol'
 
 const EVENTS: (keyof EditorEvents)[] = ['ready', 'change', 'field-change', 'saved', 'mode-change', 'dirty-change', 'field-focus']
 
@@ -37,6 +37,10 @@ export function mountEmbedded(el: HTMLElement, options: EmbedFrameOptions): () =
     const { init } = msg
     const has = (name: HostFunctionName) => init.hostFunctions.includes(name)
     const fn = <T>(name: HostFunctionName) => (has(name) ? (hostCall(name) as unknown as T) : undefined)
+    // 签署（t12）：父页面实现了 host.signing 才有；方法按 signing.state 这样的名字转过去
+    const signing = has('signing.state')
+      ? (Object.fromEntries(SIGNING_FUNCTIONS.filter((n) => has(`signing.${n}`)).map((n) => [n, hostCall(`signing.${n}`)])) as unknown as SigningApi)
+      : undefined
     const opts: EditorOptions = {
       mode: init.mode,
       modes: init.modes,
@@ -49,6 +53,7 @@ export function mountEmbedded(el: HTMLElement, options: EmbedFrameOptions): () =
       download: fn('download'),
       importDocx: fn('importDocx'),
       onSeal: fn('onSeal'),
+      signing,
       seals: init.seals,
       previewSamples: init.previewSamples,
       dataSources: init.dataSources,

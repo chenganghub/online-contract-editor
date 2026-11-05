@@ -162,6 +162,8 @@ export interface SealPlacement {
   /** 宿主的印章 id 和名称（s9 加的）：写进元素的 extension.seal，和前端放的章一样 */
   sealId?: string
   name?: string
+  /** 设了签署方的文档：哪个签署方盖的（t12 加的，写进 extension.seal.signer；编辑器只让他拖自己的章） */
+  signer?: string
 }
 
 /** 操作；一批原子执行 */

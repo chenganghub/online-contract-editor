@@ -1,11 +1,28 @@
 // 演示宿主接真实服务端（s13）：地址带 ?doc=<文档 id> 时用，模式和权限的模拟参数和本地版一样（main.ts）。
 // 先带宿主登录态向宿主后端要文档令牌（host-backend.ts），之后只用文档令牌，放在请求头 X-Document-Token；
 // 文档令牌和宿主登录态都不进任何地址（方案 4.7，验收 16）。接口和页面同源（真实部署由宿主反向代理 /api）
-import { sseCollab, type DocActions, type EditorOptions, type FieldDef, type LoadedDocument, type Mode, type Permission, type SaveResult } from '@oe/web'
+import {
+  sseCollab,
+  type CollabConnector,
+  type DocActions,
+  type EditorOptions,
+  type FieldDef,
+  type LoadedDocument,
+  type Mode,
+  type Permission,
+  type SaveResult,
+  type SignerItem,
+  type SigningApi,
+  type SigningReport,
+  type SigningResult,
+  type SigningState,
+  type VerifyResult,
+} from '@oe/web'
 import { HOST_TOKEN } from './customers'
+import { askIntent } from './intent-dialog'
 
 type ServerDoc = LoadedDocument & { mode: Mode; version: number; status: string }
-export type HostFunctions = Pick<EditorOptions, 'mode' | 'modes' | 'load' | 'save' | 'publish' | 'onSeal' | 'download' | 'collab'>
+export type HostFunctions = Pick<EditorOptions, 'mode' | 'modes' | 'load' | 'save' | 'publish' | 'onSeal' | 'download' | 'collab' | 'signing'>
 /** 演示用的当前用户（真实宿主用自己的登录态，这里用地址上的 ?user= 模拟几个人） */
 export interface DemoUser {
   id: string
@@ -22,13 +39,13 @@ async function parse<T>(res: Response, what: string): Promise<T> {
   return (await res.json()) as T
 }
 
-/** 要令牌、按令牌取文档（模式、权限、能不能打印下载以服务端为准，隐藏字段的值服务端已经剔除），返回接到服务端的宿主函数 */
-export async function connectServer(docId: string, mode: Mode, permissions: Record<string, Permission>, actions: DocActions, user?: DemoUser): Promise<HostFunctions> {
+/** 要令牌、按令牌取文档（模式、权限、能不能打印下载以服务端为准，隐藏字段的值服务端已经剔除），返回接到服务端的宿主函数。signer：签署方（盖章模式按签署方签） */
+export async function connectServer(docId: string, mode: Mode, permissions: Record<string, Permission>, actions: DocActions, user?: DemoUser, signer?: string): Promise<HostFunctions> {
   const { token } = await parse<{ token: string }>(
     await fetch('/host/token', {
       method: 'POST',
       headers: { Authorization: HOST_TOKEN, 'Content-Type': 'application/json' },
-      body: JSON.stringify({ documentId: docId, mode, permissions, actions, user }),
+      body: JSON.stringify({ documentId: docId, mode, permissions, actions, user, signer }),
     }),
     '拿文档令牌',
   )
@@ -78,17 +95,89 @@ export async function connectServer(docId: string, mode: Mode, permissions: Reco
     onSeal: async (op) => {
       await send('POST', '/seals', op)
     },
-    // 多人编辑：事件流和在场都只带文档令牌（请求头），见 docs/接入指南.md
-    collab: sseCollab({ events: `${base}/events`, presence: `${base}/presence`, lock: `${base}/lock`, document: base, comments: `${base}/comments`, revisions: `${base}/revisions`, headers: { 'X-Document-Token': token } }),
+    // 多人编辑：事件流和在场都只带文档令牌（请求头），见 docs/接入指南.md。
+    // 别人改了文档（签署时别的签署方签了、盖了章）：按事件和重新取到的版本号跟上，之后放章、签署带最新的版本号
+    collab: followVersions(sseCollab({ events: `${base}/events`, presence: `${base}/presence`, lock: `${base}/lock`, document: base, comments: `${base}/comments`, revisions: `${base}/revisions`, headers: { 'X-Document-Token': token } }), (v) => (version = Math.max(version, v))),
     download: async (format) => {
       const res = await fetch(`${base}/export?format=${format}`, { headers: { 'X-Document-Token': token } })
       if (!res.ok) return fail(res, '下载')
-      const url = URL.createObjectURL(await res.blob())
-      const a = document.createElement('a')
-      a.href = url
-      a.download = `${initial.title ?? '文档'}.${format}`
-      a.click()
-      setTimeout(() => URL.revokeObjectURL(url), 10_000)
+      saveBlob(await res.blob(), `${initial.title ?? '文档'}.${format}`)
+    },
+    signing: await signingOf(docId, base, token, initial, (run) => {
+      // 签、拒签和放章排在同一个队里（服务端每次改动版本号加 1，后一个要带前一个返回的版本号）
+      const next = last.catch(() => {}).then(() => run(version))
+      last = next
+      return next.then((r) => {
+        version = Math.max(version, r.version)
+        return r
+      })
+    }),
+  }
+}
+
+/** 事件流推来的、重新取到的文档版本号交给 seen */
+function followVersions(c: CollabConnector, seen: (version: number) => void): CollabConnector {
+  return {
+    ...c,
+    connect: (h) =>
+      c.connect({
+        ...h,
+        event: (e) => {
+          if ('version' in e) seen(e.version)
+          h.event(e)
+        },
+      }),
+    ...(c.load
+      ? {
+          load: async () => {
+            const d = await c.load!()
+            seen(d.version)
+            return d
+          },
+        }
+      : {}),
+  }
+}
+
+function saveBlob(blob: Blob, name: string) {
+  const url = URL.createObjectURL(blob)
+  const a = document.createElement('a')
+  a.href = url
+  a.download = name
+  a.click()
+  setTimeout(() => URL.revokeObjectURL(url), 10_000)
+}
+
+/**
+ * 签署（t12）：文档设了签署方才有。签署方、签署记录、下载走服务端的签署接口（令牌放请求头）；盖章模式的令牌绑定了签署方时能签、拒签，
+ * 意愿认证是演示的短信验证码（intent-dialog.ts）；验签经宿主后端转给服务端（要 API Key）
+ */
+async function signingOf(docId: string, base: string, token: string, initial: ServerDoc, enqueue: (run: (version: number) => Promise<SigningResult>) => Promise<SigningResult>): Promise<SigningApi | undefined> {
+  const call = async <T>(method: string, path: string, body?: unknown): Promise<T> =>
+    parse<T>(await fetch(base + path, { method, headers: { 'X-Document-Token': token, ...(body === undefined ? {} : { 'Content-Type': 'application/json' }) }, body: body === undefined ? undefined : JSON.stringify(body) }), '签署')
+  const state = await call<SigningState>('GET', '/signers')
+  if (!state.signers.length) return undefined
+  const signer = initial.mode === 'seal' && state.me ? state.me : null
+  return {
+    state: () => call<SigningState>('GET', '/signers'),
+    ...(signer
+      ? {
+          confirmIntent: (s: SignerItem) => askIntent(docId, s),
+          sign: (req: { signatures: Record<string, string>; intent?: string }) => enqueue((version) => call<SigningResult>('POST', '/sign', { action: 'sign', version, ...req })),
+          reject: (reason: string) => enqueue((version) => call<SigningResult>('POST', '/sign', { action: 'reject', version, reason })),
+        }
+      : {}),
+    report: () => call<SigningReport>('GET', '/signing-report'),
+    download: async (what: 'signed' | 'report') => {
+      const res = await fetch(base + (what === 'signed' ? '/signed-file' : '/signing-report?format=pdf'), { headers: { 'X-Document-Token': token } })
+      if (!res.ok) return fail(res, '下载')
+      saveBlob(await res.blob(), what === 'signed' ? `${initial.title ?? '文档'}（已签署）.pdf` : `${initial.title ?? '文档'}签署报告.pdf`)
+    },
+    verify: async (file: File) => {
+      const bytes = new Uint8Array(await file.arrayBuffer())
+      let bin = ''
+      for (let i = 0; i < bytes.length; i += 0x8000) bin += String.fromCharCode(...bytes.subarray(i, i + 0x8000))
+      return parse<VerifyResult>(await fetch('/host/verify', { method: 'POST', headers: { Authorization: HOST_TOKEN, 'Content-Type': 'application/json' }, body: JSON.stringify({ pdf: btoa(bin) }) }), '验签')
     },
   }
 }

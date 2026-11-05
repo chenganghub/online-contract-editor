@@ -44,6 +44,8 @@ export const ICONS = {
   history: { d: ['M2.75 8a5.25 5.25 0 1 0 1.6-3.75', 'M2.5 2.5v2.5H5', 'M8 5.25V8l2 1.25'] },
   // 条件条款：一条线分出一个岔（arrow.triangle.branch）
   branch: { d: ['M4.5 2.5v11', 'M4.5 9c0-2.25 1.5-4 3.75-4h4.25', 'M10.25 2.75 12.5 5l-2.25 2.25'] },
+  // 签署记录：一笔签名加下面一道线（signature）
+  signature: { d: ['M2.5 10.5c1.25-2.5 2.5-6.5 3.75-6.5s-.75 6.5.75 6.5 1.75-3.25 2.75-3.25-.25 2.75 1 2.75 1.75-1 2.75-1.5', 'M2.5 13.25h11'] },
 } satisfies Record<string, IconShape>
 
 export type IconName = keyof typeof ICONS

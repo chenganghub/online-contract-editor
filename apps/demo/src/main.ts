@@ -91,9 +91,23 @@ try {
     params.delete('fromTemplate'); params.delete('version'); params.set('doc', docId); params.set('mode', 'fill')
     history.replaceState(null, '', `?${params}`)
   }
-  // 多人编辑演示：两个窗口用 ?user=张三、?user=李四 打开同一个 ?doc=
+  // 签署演示（t12）：?signdemo 按保密协议范本建一份两方签署的合同（签名区的占位图要在浏览器里画），甲方张三先签
+  if (params.has('signdemo')) {
+    const nda = SAMPLES.find((s) => s.id === 'nda')!
+    const created = (await request({ url: '/host/sign-demo', method: 'POST', body: { title: nda.title, doc: nda.doc(), fields: nda.fields, values: nda.preview[0]?.values } })) as { id: string }
+    docId = created.id
+    openingMode = 'seal'
+    for (const [k, v] of Object.entries({ doc: docId, mode: 'seal', user: '张三', signer: 'a' })) params.set(k, v)
+    params.delete('signdemo')
+    history.replaceState(null, '', `?${params}`)
+  }
+  // 多人编辑演示：两个窗口用 ?user=张三、?user=李四 打开同一个 ?doc=；签署：再加 &signer=a（甲方）、&signer=b（乙方）
   const user = params.get('user')
-  const host = templateId ? await connectTemplate(templateId) : docId ? await connectServer(docId, openingMode, permissions, actions, user ? { id: user, name: user } : undefined) : local
+  const host = templateId
+    ? await connectTemplate(templateId)
+    : docId
+      ? await connectServer(docId, openingMode, permissions, actions, user ? { id: user, name: user } : undefined, params.get('signer') ?? undefined)
+      : local
   const handle = await createEditor(el, { ...host, seals: demoSeals(), request, dataSources: DATA_SOURCES, importDocx: pages ? undefined : importDocx, previewSamples: sample.preview })
   // 给端到端测试用
   ;(window as unknown as { __oe: unknown }).__oe = handle

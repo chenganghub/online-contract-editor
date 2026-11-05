@@ -3,7 +3,7 @@ import { fileURLToPath } from 'node:url'
 import { defineConfig, type Plugin } from 'vite'
 import vue from '@vitejs/plugin-vue'
 import { CUSTOMERS, HOST_TOKEN, queryCustomers } from './src/customers'
-import { createFromOrder, issueToken, openTemplate, type ServerApi, type TokenRequest } from './src/host-backend'
+import { createFromOrder, createSignDemo, issueToken, openTemplate, registerIntent, verifyFile, type ServerApi, type TokenRequest } from './src/host-backend'
 import { PAY_OPTIONS } from './src/sample'
 
 // 开发时的模拟客户接口（npx vite 时可用）；没带宿主登录态返回 401
@@ -47,7 +47,7 @@ const hostBackend = (): Plugin => ({
   configureServer(server) {
     server.middlewares.use('/host', async (req, res, next) => {
       const route = new URL(req.url ?? '/', 'http://x').pathname
-      if (route !== '/token' && route !== '/template' && route !== '/contract') return next()
+      if (!['/token', '/template', '/contract', '/intent', '/verify', '/sign-demo'].includes(route)) return next()
       const send = (status: number, json: unknown) => {
         res.statusCode = status
         res.setHeader('content-type', 'application/json; charset=utf-8')
@@ -65,18 +65,26 @@ const hostBackend = (): Plugin => ({
       }
       let body: unknown
       try {
-        const raw = await readBody(req)
+        // 验签要传整份 PDF、建签署演示要传整份文档（带签名区占位图），放宽到 20 MB
+        const raw = await readBody(req, route === '/verify' || route === '/sign-demo' ? 20 * 1024 * 1024 : undefined)
         if (raw === null) return send(413, { code: 'TOO_LARGE', message: '请求体太大' })
         body = JSON.parse(raw)
       } catch {
         return send(400, { code: 'BAD_REQUEST', message: '请求体不是 JSON' })
       }
       try {
+        const auth = req.headers.authorization
         const r = route === '/contract'
-          ? await createFromOrder(api, req.headers.authorization, body as { templateId: string; versionNo: number; orderId: string })
+          ? await createFromOrder(api, auth, body as { templateId: string; versionNo: number; orderId: string })
           : route === '/template'
-          ? await openTemplate(api, req.headers.authorization, body as { templateId: string })
-          : await issueToken(api, req.headers.authorization, body as TokenRequest)
+          ? await openTemplate(api, auth, body as { templateId: string })
+          : route === '/intent'
+          ? await registerIntent(api, auth, body as { documentId: string; signer: string; code: string })
+          : route === '/verify'
+          ? await verifyFile(api, auth, body as { pdf: string })
+          : route === '/sign-demo'
+          ? await createSignDemo(api, auth, body as { doc: unknown; fields: unknown; values?: Record<string, unknown>; title?: string })
+          : await issueToken(api, auth, body as TokenRequest)
         send(r.status, r.json)
       } catch (e) {
         send(502, { code: 'SERVER_UNAVAILABLE', message: `服务端不可用：${e instanceof Error ? e.message : String(e)}` })

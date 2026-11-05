@@ -3,10 +3,10 @@
 // 安全：只认这个 iframe 发来的、来源是嵌入页的消息；令牌、登录态不进 iframe 地址，宿主函数在父页面执行
 import type { BatchResult, FieldValue, Mode, Op } from '@oe/core'
 import type { EditorEvents, EditorOptions, ExportFormat, LoadedDocument, SavePayload } from '../types'
-import { HOST_FUNCTIONS, PROTOCOL, isMessage, transferable, type EditorMethodName, type EmbedInit, type FrameMessage, type HostFunctionName, type HostMessageBody } from './protocol'
+import { HOST_FUNCTIONS, PROTOCOL, SIGNING_FUNCTIONS, isMessage, transferable, type EditorMethodName, type EmbedInit, type FrameMessage, type HostFunctionName, type HostMessageBody, type SigningFunctionName } from './protocol'
 
-/** 父页面实现的宿主函数，和 createEditor 的同名选项一样；没实现的不传 */
-export type EmbedHostFunctions = Partial<Pick<EditorOptions, HostFunctionName>>
+/** 父页面实现的宿主函数，和 createEditor 的同名选项一样（签署是 signing 对象）；没实现的不传 */
+export type EmbedHostFunctions = Partial<Pick<EditorOptions, (typeof HOST_FUNCTIONS)[number] | 'signing'>>
 
 export interface ConnectOptions extends Omit<EmbedInit, 'hostFunctions' | 'document'> {
   /** 嵌入页的来源，如 https://editor.example.com；别的来源发来的消息丢掉 */
@@ -50,7 +50,10 @@ export function connectEmbed(iframe: HTMLIFrameElement, options: ConnectOptions)
   let seq = 0
   let initSent = false
   const post = (msg: HostMessageBody) => iframe.contentWindow?.postMessage({ protocol: PROTOCOL, ...msg }, origin)
-  const hostFunctions = HOST_FUNCTIONS.filter((name) => typeof host[name] === 'function')
+  const hostFunctions: HostFunctionName[] = [
+    ...HOST_FUNCTIONS.filter((name) => typeof host[name] === 'function'),
+    ...SIGNING_FUNCTIONS.filter((name) => typeof host.signing?.[name] === 'function').map((name) => `signing.${name}` as const),
+  ]
 
   return new Promise<EmbedHandle>((resolve, reject) => {
     const timer = setTimeout(() => {
@@ -68,7 +71,13 @@ export function connectEmbed(iframe: HTMLIFrameElement, options: ConnectOptions)
     async function request(msg: Extract<FrameMessage, { type: 'request' }>) {
       const reply = (ok: boolean, result?: unknown, error?: string) => post({ type: 'reply', id: msg.id, ok, result, error })
       try {
-        const fn = host[msg.method] as ((...a: unknown[]) => unknown) | undefined
+        // 只调白名单里的：普通宿主函数，或签署接口的方法（signing.state 这样）
+        const name = msg.method.startsWith('signing.') ? (msg.method.slice(8) as SigningFunctionName) : null
+        const fn = (
+          name
+            ? (SIGNING_FUNCTIONS as readonly string[]).includes(name) && host.signing?.[name]?.bind(host.signing)
+            : (HOST_FUNCTIONS as readonly string[]).includes(msg.method) && host[msg.method as (typeof HOST_FUNCTIONS)[number]]
+        ) as ((...a: unknown[]) => unknown) | undefined | false
         if (!fn) throw new Error(`父页面没有实现 ${msg.method}`)
         reply(true, transferable(await fn(...(msg.args ?? []))))
       } catch (e) {

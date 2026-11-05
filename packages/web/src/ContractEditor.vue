@@ -68,6 +68,9 @@ import TracePanel from './TracePanel.vue'
 import VersionsPanel from './VersionsPanel.vue'
 import ComparePane from './ComparePane.vue'
 import ConditionPop from './ConditionPop.vue'
+import SignPad from './SignPad.vue'
+import SigningPanel from './SigningPanel.vue'
+import SigningRecord from './SigningRecord.vue'
 import { useComments } from './useComments'
 import { useVersions } from './useVersions'
 import { useTemplateDesign } from './useTemplateDesign'
@@ -95,7 +98,7 @@ import {
   type ExportFormat,
   type ImportFormat,
 } from './files'
-import type { CollabBy, CollabConnector, CollabEvent, CollabLock, CollabViewer, DocActions, EditorEvents, FieldConflict, ImportResult, PickItem, PickSearch, PreviewSample, SavePayload, SaveResult, SealOp, SealOption } from './types'
+import type { CollabBy, CollabConnector, CollabEvent, CollabLock, CollabViewer, DocActions, EditorEvents, FieldConflict, ImportResult, PickItem, PickSearch, PreviewSample, SavePayload, SaveResult, SealOp, SealOption, SigningApi, SigningState } from './types'
 
 const props = defineProps<{
   mode: Mode
@@ -121,6 +124,8 @@ const props = defineProps<{
   confirmLeave?: boolean
   /** 多人编辑的事件流（08 第 3 节）；不传就是一个人用 */
   collab?: CollabConnector
+  /** 签署（08 第 5 节）：签署方和进度、签名板、确认签署、拒签、签署记录；不传就是原来的盖章 */
+  signing?: SigningApi
 }>()
 
 // 给宿主的事件（SDK 的 on，iframe 嵌入转发给父页面）：名字和载荷见 types.ts 的 EditorEvents
@@ -180,7 +185,7 @@ watch(status, (s) => {
   else if (SAVED_STATES.has(s)) dirty.value = false
 })
 /** 状态文字用主色提醒：没填完、格式不对、保存失败这类 */
-const NORMAL_STATES = new Set([...SAVED_STATES, '已编辑', '已导入', '正在保存', '正在导入', '正在导出'])
+const NORMAL_STATES = new Set([...SAVED_STATES, '已编辑', '已导入', '正在保存', '正在导入', '正在导出', '已签名', '签好了，确认后生效', '正在签署', '已签署', '签署完成'])
 const attention = computed(() => !NORMAL_STATES.has(status.value))
 const fields = reactive<FieldDef[]>(structuredClone(props.fields))
 const perms = reactive<Record<string, Permission>>({ ...props.permissions })
@@ -205,7 +210,8 @@ const shownModes = computed(() => props.modes ?? [props.mode])
 // 打印、下载按令牌（宿主给的 actions）；下载见「下载」一节的 canExport
 const canPrint = computed(() => props.actions?.print !== false)
 
-interface Placed { id: string; sealId: string; name: string; src: string; pageNo: number; x: number; y: number }
+/** signer：设了签署方的文档里，哪个签署方盖的（extension.seal.signer） */
+interface Placed { id: string; sealId: string; name: string; src: string; pageNo: number; x: number; y: number; signer?: string }
 const placed = ref<Placed[]>([])
 const handles = ref<(Placed & { left: number; top: number })[]>([])
 const dragging = ref<string | null>(null)
@@ -213,8 +219,8 @@ const dropTarget = ref(false)
 
 const picker = reactive({ open: false, field: null as FieldDef | null, query: '', page: 0, index: 0, items: [] as PickItem[], pages: 1, left: 0, top: 0, origin: 'top center' })
 const menu = reactive({ open: false, left: 0, top: 0 })
-/** 检查器位置上开着的面板：批注、修订、版本（08 第 3 节），同一时间一个 */
-const panel = ref<'comments' | 'trace' | 'versions' | null>(null)
+/** 检查器位置上开着的面板：批注、修订、版本（08 第 3 节）、签署记录（第 5 节），同一时间一个 */
+const panel = ref<'comments' | 'trace' | 'versions' | 'signing' | null>(null)
 const togglePanel = (p: NonNullable<typeof panel.value>) => (panel.value = panel.value === p ? null : p)
 /** 在看修订：编辑模式里开着修订面板，正文换成修订模式（只读，画出增删） */
 const reviewing = computed(() => panel.value === 'trace' && mode.value === 'edit')
@@ -1161,6 +1167,8 @@ function primary(publish = false, auto = false, keepStatus = false): Promise<voi
 /** keepStatus：状态那里不改（必填没填时顺手存一下草稿，「N 项未填」留着） */
 async function runPrimary(publish: boolean, auto: boolean, keepStatus: boolean) {
   if (mode.value === 'view') return canExport.value ? exportFile('pdf') : undefined
+  // 设了签署方的文档：盖章模式的主按钮是「确认签署」
+  if (signingOn.value) return confirmSigning()
   // 多人编辑：编辑锁在别人手上、文档已经不能改了，都不保存（状态那里显示原因）
   if ((mode.value === 'edit' && lockBlocked.value) || frozen.value) return
   const say = (s: string) => {
@@ -1410,11 +1418,11 @@ function openMenu() {
 /** 文档里已有的印章：带 extension.seal 的浮动图片 */
 function sealsOf(main: IElement[]): Placed[] {
   const out: Placed[] = []
-  for (const el of main as (IElement & { extension?: { seal?: { sealId: string; name: string } } })[]) {
+  for (const el of main as (IElement & { extension?: { seal?: { sealId: string; name: string; signer?: string } } })[]) {
     const seal = el.extension?.seal
     if (el.type === 'image' && seal && el.id && el.imgFloatPosition) {
       const { x, y, pageNo = 0 } = el.imgFloatPosition as { x: number; y: number; pageNo?: number }
-      out.push({ id: el.id, sealId: seal.sealId, name: seal.name, src: el.value, pageNo, x, y })
+      out.push({ id: el.id, sealId: seal.sealId, name: seal.name, src: el.value, pageNo, x, y, ...(seal.signer ? { signer: seal.signer } : {}) })
     }
   }
   return out
@@ -1431,7 +1439,9 @@ function pageAt(x: number, y: number) {
 }
 /** 盖章层记的章 → 文档里的浮动图片元素（和 @oe/core 的 placeSeal 写法一样） */
 const sealElement = (s: Placed): SealElement =>
-  ({ id: s.id, type: 'image', value: s.src, width: SEAL_SIZE, height: SEAL_SIZE, imgDisplay: 'float-top', imgFloatPosition: { x: s.x, y: s.y, pageNo: s.pageNo }, extension: { seal: { sealId: s.sealId, name: s.name } } }) as unknown as SealElement
+  ({ id: s.id, type: 'image', value: s.src, width: SEAL_SIZE, height: SEAL_SIZE, imgDisplay: 'float-top', imgFloatPosition: { x: s.x, y: s.y, pageNo: s.pageNo }, extension: { seal: { sealId: s.sealId, name: s.name, ...(s.signer ? { signer: s.signer } : {}) } } }) as unknown as SealElement
+/** 这个章能不能动：没设签署方的都能；设了的只能动自己（这个签署方）盖的，还要轮到自己 */
+const sealMovable = (s: Placed) => !signingOn.value || (myTurn.value && s.signer === signMe.value?.key)
 const clampPos = (x: number, y: number) => ({
   x: Math.round(Math.min(Math.max(0, x), PAGE.width - SEAL_SIZE)),
   y: Math.round(Math.min(Math.max(0, y), PAGE.height - SEAL_SIZE)),
@@ -1440,17 +1450,23 @@ function dropSeal(sealId: string, clientX: number, clientY: number) {
   const seal = props.seals?.find((s) => s.id === sealId)
   const at = seal && pageAt(clientX, clientY)
   if (!seal || !at) return null
+  // 设了签署方的文档：轮到自己才能盖，盖的章记在自己名下（和服务端一样）
+  if (signingOn.value && !myTurn.value) {
+    status.value = '还没轮到你签'
+    return null
+  }
+  const signer = signingOn.value ? signMe.value!.key : undefined
   const { x, y } = clampPos(at.x - SEAL_SIZE / 2, at.y - SEAL_SIZE / 2)
   const id = `seal-${uid()}`
   // 打印模式下插不进元素：同一段同步代码里临时切编辑模式插入再切回，中间不让出主线程，用户的输入进不来
   silently(() => {
     cmd().executeMode(EditorMode.EDIT)
     cmd().executeAppendElementList([
-      { id, type: 'image', value: seal.src, width: SEAL_SIZE, height: SEAL_SIZE, imgDisplay: 'float-top', imgFloatPosition: { x, y, pageNo: at.pageNo }, extension: { seal: { sealId, name: seal.name } } } as unknown as IElement,
+      { id, type: 'image', value: seal.src, width: SEAL_SIZE, height: SEAL_SIZE, imgDisplay: 'float-top', imgFloatPosition: { x, y, pageNo: at.pageNo }, extension: { seal: { sealId, name: seal.name, ...(signer ? { signer } : {}) } } } as unknown as IElement,
     ])
     cmd().executeMode(EDITOR_MODE.seal)
   })
-  placed.value.push({ id, sealId, name: seal.name, src: seal.src, pageNo: at.pageNo, x, y })
+  placed.value.push({ id, sealId, name: seal.name, src: seal.src, pageNo: at.pageNo, x, y, ...(signer ? { signer } : {}) })
   // 追加在末尾的章会画到最后一页，挂到它自己那一页
   silently(() => anchorSeals(editor.value!, [sealElement(placed.value.at(-1)!)]))
   status.value = '已编辑'
@@ -1517,6 +1533,8 @@ function renderHandles() {
 function dragHandle(e: PointerEvent, id: string) {
   const el = e.currentTarget as HTMLElement
   e.preventDefault()
+  const s = placed.value.find((v) => v.id === id)
+  if (!s || !sealMovable(s)) return
   el.setPointerCapture(e.pointerId)
   const start = { x: e.clientX, y: e.clientY }
   dragging.value = id
@@ -1542,6 +1560,121 @@ function onDrop(e: DragEvent) {
   if (mode.value !== 'seal') return
   e.preventDefault()
   dropSeal(e.dataTransfer!.getData('text/plain'), e.clientX, e.clientY)
+}
+
+// ---------- 签署（08 第 5 节，t12）：进度和自己的签名在 SigningPanel.vue，签名板 SignPad.vue，签署记录 SigningRecord.vue ----------
+// 签名先只在本地（drafts，预览画在签名区上），「确认签署」时连同意愿认证凭据一起交给宿主，服务端写签名和签署日期，返回签完的文档
+const signState = shallowRef<SigningState | null>(null)
+const signMe = computed(() => signState.value?.signers.find((s) => s.key === signState.value?.me) ?? null)
+/** 盖章模式按签署方签（宿主接了 sign，令牌绑定了签署方） */
+const signingOn = computed(() => mode.value === 'seal' && !!props.signing?.sign && !!signMe.value)
+const myTurn = computed(() => !!signMe.value && signMe.value.status === 'waiting' && signState.value!.status === 'sealing' && signState.value!.turn.includes(signMe.value.key))
+const mySignFields = computed(() => fields.filter((f) => f.type === 'signature' && !!f.signer && f.signer === signMe.value?.key))
+const drafts = reactive<Record<string, string>>({})
+const signBusy = ref(false)
+/** 自己的签名都签了；没有签名区的（只盖章的企业）要先盖章 */
+const canConfirm = computed(() => myTurn.value && !signBusy.value && mySignFields.value.every((f) => !!drafts[f.key]) && (mySignFields.value.length > 0 || placed.value.some((s) => s.signer === signMe.value?.key)))
+/** 签署记录面板换内容（签了、拒签了、状态变了） */
+const signStamp = ref(0)
+async function refreshSigning() {
+  if (!props.signing) return
+  signState.value = await props.signing.state().catch(() => signState.value)
+  signStamp.value++
+}
+/** 签名区在文档里的图片元素 id（表格里的也找） */
+function signatureIds(key: string, list: IElement[] = readDoc().main, out: string[] = []): string[] {
+  for (const el of list) {
+    if (el.type === 'image' && el.id && (el.extension as { field?: string } | undefined)?.field === key) out.push(el.id)
+    if (el.type === 'table') for (const tr of el.trList ?? []) for (const td of tr.tdList) signatureIds(key, td.value, out)
+  }
+  return out
+}
+const pad = ref<{ key: string; label: string; width: number; height: number } | null>(null)
+function openPad(f: FieldDef) {
+  const [id] = signatureIds(f.key)
+  const el = id ? (cmd().getElementById?.({ id })?.[0] as IElement | undefined) : undefined
+  pad.value = { key: f.key, label: f.label, width: el?.width ?? 160, height: el?.height ?? 56 }
+}
+/** 签名板签好了：记下来，画在签名区上看效果（打印模式下改不了元素，临时切编辑模式） */
+function useSignature(dataURL: string) {
+  const key = pad.value!.key
+  pad.value = null
+  drafts[key] = dataURL
+  const ids = signatureIds(key)
+  silently(() => {
+    cmd().executeMode(EditorMode.EDIT)
+    for (const id of ids) cmd().executeUpdateElementById({ id, properties: { value: dataURL } })
+    cmd().executeMode(EDITOR_MODE.seal)
+  })
+  status.value = canConfirm.value ? '签好了，确认后生效' : '已签名'
+}
+/** 换成服务端给的文档（签完、拒签、别人签了）：印章挂回各自那一页 */
+function showDoc(doc: DocData) {
+  silently(() => {
+    cmd().executeMode(EditorMode.EDIT)
+    cmd().executeSetValue({ header: doc.header ?? [], main: doc.main, footer: doc.footer ?? [] } as unknown as IEditorData)
+    cmd().executeMode(editorModeFor(mode.value))
+  })
+  placed.value = sealsOf(doc.main as unknown as IElement[])
+  const docSeals = (doc.main as unknown as SealElement[]).filter((el) => placed.value.some((p) => p.id === el.id))
+  if (docSeals.length) silently(() => anchorSeals(editor.value!, plain(docSeals)))
+  conditionKeys.value = conditionFields(doc)
+  applyPermissions()
+  quietUntil = performance.now() + 2000
+  tick.value++
+  void nextTick(renderHandles)
+}
+async function confirmSigning() {
+  const api = props.signing!
+  const me = signMe.value!
+  if (!canConfirm.value) {
+    status.value = !myTurn.value ? '还没轮到你签' : mySignFields.value.length ? '先签名' : '先盖章'
+    return
+  }
+  signBusy.value = true
+  try {
+    let intent: string | undefined
+    if (me.intentRequired) {
+      const got = await api.confirmIntent?.(me)
+      if (!got) {
+        status.value = '没有确认签署'
+        return
+      }
+      intent = got
+    }
+    status.value = '正在签署'
+    const r = await api.sign!({ signatures: { ...drafts }, ...(intent ? { intent } : {}) })
+    for (const k of Object.keys(drafts)) delete drafts[k]
+    showDoc(r.doc)
+    await refreshSigning()
+    status.value = r.status === 'sealed' ? '签署完成' : '已签署'
+    emit('saved', { mode: 'seal', published: false })
+  } catch (e) {
+    status.value = e instanceof Error ? e.message : String(e)
+  } finally {
+    signBusy.value = false
+  }
+}
+async function rejectSigning(reason: string) {
+  signBusy.value = true
+  try {
+    const r = await props.signing!.reject!(reason)
+    for (const k of Object.keys(drafts)) delete drafts[k]
+    showDoc(r.doc)
+    await refreshSigning()
+    status.value = '已拒签'
+  } catch (e) {
+    status.value = e instanceof Error ? e.message : String(e)
+  } finally {
+    signBusy.value = false
+  }
+}
+/** 别人签了、拒签了：重新取文档（看到对方的签名）和进度；自己签的已经换过了 */
+async function onSigningEvent(e: Extract<CollabEvent, { type: 'signing' }>) {
+  if (e.signer === signMe.value?.key && e.action === 'sign') return
+  const loaded = await props.collab?.load?.().catch(() => null)
+  if (loaded) showDoc(loaded.doc)
+  await refreshSigning()
 }
 
 // ---------- 给宿主的事件和方法（07 第 4 节；SDK 和 iframe 嵌入共用）----------
@@ -2012,7 +2145,9 @@ function onCollab(e: CollabEvent) {
   } else if (e.type === 'status') {
     docStatus.value = e.status
     versionStamp.value++
+    void refreshSigning()
   } else if (e.type === 'comments' && e.conn !== selfConn.value) void comments.refresh()
+  else if (e.type === 'signing') void onSigningEvent(e)
 }
 function onCollabState(s: 'connecting' | 'open' | 'closed') {
   collabState.value = s
@@ -2206,6 +2341,8 @@ onMounted(async () => {
     disconnect = props.collab.connect({ event: onCollab, state: onCollabState, since: () => docVersion || undefined })
     window.addEventListener('pagehide', onPageHide)
   }
+  // 签署进度（盖章模式的检查器、签署记录要用）
+  void refreshSigning()
   emit('ready')
 })
 const onResize = () => {
@@ -2317,13 +2454,15 @@ defineExpose({
           <OeIcon name="trace" /><span v-if="traces.length" class="badge" aria-hidden="true">{{ traces.length }}</span>
         </button>
         <button v-if="collab?.revisions && mode !== 'seal'" type="button" class="icon-button oe-versions" aria-label="版本" title="版本" :aria-pressed="panel === 'versions'" @click="togglePanel('versions')"><OeIcon name="history" /></button>
+        <button v-if="signing?.report && signState?.signers.length" type="button" class="icon-button oe-signing" aria-label="签署记录" title="签署记录" :aria-pressed="panel === 'signing'" @click="togglePanel('signing')"><OeIcon name="signature" /></button>
         <button v-if="canFind" type="button" class="icon-button oe-find" aria-label="查找" :title="tip(mode === 'edit' ? '查找替换' : '查找', shortcut('F'))" :aria-expanded="find.open" @mousedown.prevent @click="find.open ? closeFind() : openFind(false)"><OeIcon name="search" /></button>
         <button v-if="mode === 'view' && canPrint" type="button" class="icon-button oe-print" aria-label="打印" :title="tip('打印', shortcut('P'))" @click="print()"><OeIcon name="print" /></button>
         <button v-if="mode === 'edit' || canExport" ref="exportBtn" type="button" class="icon-button oe-export" aria-label="导出" :title="mode === 'edit' ? '打开、下载、打印' : '下载、打印'" :aria-expanded="menu.open" @click.stop="openMenu"><OeIcon name="export" /></button>
         <!-- 多人编辑：锁在别人手上时请求编辑；自己拿着锁、别人请求时交出去 -->
         <button v-if="lockBlocked && lockState && !frozen" type="button" class="button-tinted oe-lock-request" :disabled="lockRequested" @click="requestLock">{{ lockRequested ? '已请求' : '请求编辑' }}</button>
         <button v-if="holding && lockRequest" type="button" class="button-tinted oe-lock-handover" @click="handOver">交给{{ lockRequest.name }}</button>
-        <button v-if="mode !== 'view' || canExport" type="button" class="oe-primary" :class="publish && mode === 'edit' ? 'button-tinted' : 'button-primary'" :disabled="saving || (mode === 'edit' && lockBlocked) || frozen" @click="primary()">{{ publish && mode === 'edit' ? '保存草稿' : PRIMARY[mode] }}</button>
+        <button v-if="signingOn" type="button" class="oe-primary button-primary" :disabled="!canConfirm" @click="primary()">{{ signMe!.status === 'signed' ? '已签署' : '确认签署' }}</button>
+        <button v-else-if="mode !== 'view' || canExport" type="button" class="oe-primary" :class="publish && mode === 'edit' ? 'button-tinted' : 'button-primary'" :disabled="saving || (mode === 'edit' && lockBlocked) || frozen" @click="primary()">{{ publish && mode === 'edit' ? '保存草稿' : PRIMARY[mode] }}</button>
         <button v-if="publish && mode === 'edit'" type="button" class="button-primary" :disabled="saving" @click="primary(true)">发布模板</button>
         <button v-if="mode === 'edit' && previewSamples?.length" type="button" class="button-tinted" @click="preview = data().doc">预览</button>
       </div>
@@ -2390,6 +2529,7 @@ defineExpose({
           @close="panel = null"
         />
         <VersionsPanel v-else-if="panel === 'versions' && collab?.revisions" :store="versions" :stamp="versionStamp" @compare="(v: number) => (comparing = { from: v, to: 'current' })" @close="panel = null" />
+        <SigningRecord v-else-if="panel === 'signing' && signing" :api="signing" :stamp="signStamp" @close="panel = null" />
         <div v-else-if="mode === 'edit'" class="inspector-body">
           <section v-if="report" class="section import-report">
             <h2 class="section-title">
@@ -2451,7 +2591,9 @@ defineExpose({
           </ul>
         </div>
         <div v-else-if="mode === 'seal'" class="inspector-body">
-          <section class="section">
+          <!-- 签署（t12）：签署方和进度、自己的签名、拒签；个人签署方没有印章 -->
+          <SigningPanel v-if="signingOn" :state="signState!" :fields="fields" :drafts="drafts" :busy="signBusy" @sign="openPad" @reject="rejectSigning" />
+          <section v-if="!signingOn || (signMe!.kind === 'org' && myTurn)" class="section">
             <h2 class="section-title">印章</h2>
             <div class="seal-grid">
               <div v-for="s in seals ?? []" :key="s.id" class="seal-card" draggable="true" :data-seal="s.id" @dragstart="onSealDragStart($event, s)">
@@ -2463,10 +2605,10 @@ defineExpose({
             <h2 class="section-title">已盖</h2>
             <ul v-if="placed.length" class="rows">
               <li v-for="s in placed" :key="s.id" class="row">
-                <span>{{ s.name }}</span>
+                <span>{{ s.name }}<span v-if="s.signer && signingOn" class="row-meta">{{ signerName(s.signer) }}</span></span>
                 <span class="row-trailing">
                   <span class="row-meta">第 {{ s.pageNo + 1 }} 页</span>
-                  <button type="button" class="icon-button small remove" aria-label="移除" @click="removeSeal(s.id)"><OeIcon name="xmark" /></button>
+                  <button v-if="sealMovable(s)" type="button" class="icon-button small remove" aria-label="移除" @click="removeSeal(s.id)"><OeIcon name="xmark" /></button>
                 </span>
               </li>
             </ul>
@@ -2508,6 +2650,7 @@ defineExpose({
     </div>
     <TemplatePreview v-if="preview" :doc="preview" :fields="plain(fields)" :samples="previewSamples!" @close="preview = undefined" />
     <ComparePane v-if="comparing && collab?.revisions" :store="versions" :current="currentDoc" :from="comparing.from" :to="comparing.to" :look="editorLook" @close="comparing = null" />
+    <SignPad v-if="pad" :label="pad.label" :width="pad.width" :height="pad.height" @done="useSignature" @cancel="pad = null" />
     <ConditionPop v-if="conditionPop.open && mode === 'edit'" :fields="choiceFields" :current="conditionPop.current" :left="conditionPop.left" :top="conditionPop.top" @apply="applyCondition" @remove="removeCondition" @close="conditionPop.open = false" />
     <form
       v-if="draft.open"

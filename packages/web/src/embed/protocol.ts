@@ -7,7 +7,10 @@ export const PROTOCOL = 'oe-embed/1'
 
 /** 宿主函数：在父页面实现，嵌入页要用时发 request 过去调（带父页面自己的登录态） */
 export const HOST_FUNCTIONS = ['save', 'publish', 'search', 'request', 'download', 'importDocx', 'onSeal'] as const
-export type HostFunctionName = (typeof HOST_FUNCTIONS)[number]
+/** 签署接口（types.ts 的 SigningApi，t12）的方法：父页面实现 host.signing，嵌入页按 signing.state 这样的名字调 */
+export const SIGNING_FUNCTIONS = ['state', 'confirmIntent', 'sign', 'reject', 'report', 'download', 'verify'] as const
+export type SigningFunctionName = (typeof SIGNING_FUNCTIONS)[number]
+export type HostFunctionName = (typeof HOST_FUNCTIONS)[number] | `signing.${SigningFunctionName}`
 
 /** 父页面能调的编辑器方法（EditorHandle 上的，白名单外的不执行） */
 export const EDITOR_METHODS = [
